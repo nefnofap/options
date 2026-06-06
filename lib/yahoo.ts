@@ -2,6 +2,7 @@
 // We deliberately avoid the v7 endpoints that now require crumb/cookie.
 
 import type { ChartBar, NewsItem, QuoteSnapshot } from "./types";
+import { UpstreamError } from "./errors";
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -33,49 +34,68 @@ export async function getYahooChart(
   symbol: string,
   range: "1d" | "5d" | "1mo" | "3mo" | "6mo" | "1y" | "5y" = "3mo",
   interval: "1m" | "5m" | "15m" | "1h" | "1d" | "1wk" = "1d",
-): Promise<{ symbol: string; bars: ChartBar[]; spot: number; prevClose: number } | null> {
+): Promise<{ symbol: string; bars: ChartBar[]; spot: number; prevClose: number }> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     symbol,
   )}?range=${range}&interval=${interval}&includePrePost=false`;
+  let res: Response;
   try {
-    const res = await fetch(url, {
+    res = await fetch(url, {
       headers: { "User-Agent": UA, Accept: "application/json" },
       next: { revalidate: 60 },
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as YahooChartResp;
-    const r = json.chart?.result?.[0];
-    if (!r) return null;
-    const ts = r.timestamp || [];
-    const q = r.indicators?.quote?.[0];
-    if (!q) return null;
-    const bars: ChartBar[] = [];
-    for (let i = 0; i < ts.length; i++) {
-      const o = q.open[i];
-      const h = q.high[i];
-      const l = q.low[i];
-      const c = q.close[i];
-      const v = q.volume[i];
-      if (o == null || h == null || l == null || c == null) continue;
-      bars.push({ t: ts[i], o, h, l, c, v: v ?? 0 });
-    }
-    return {
-      symbol: r.meta.symbol,
-      bars,
-      spot: r.meta.regularMarketPrice,
-      prevClose: r.meta.chartPreviousClose,
-    };
-  } catch {
-    return null;
+  } catch (e) {
+    throw new UpstreamError(
+      "yahoo",
+      0,
+      `Yahoo chart request failed (network/DNS): ${(e as Error).message}`,
+    );
   }
+  if (res.status === 404) {
+    throw new UpstreamError("yahoo", 404, `Yahoo has no chart data for "${symbol}".`);
+  }
+  if (!res.ok) {
+    throw new UpstreamError(
+      "yahoo",
+      res.status,
+      `Yahoo chart returned HTTP ${res.status} for ${symbol}${
+        res.status === 401 || res.status === 403 ? " (likely crumb/cookie gating)" : ""
+      }.`,
+    );
+  }
+  const json = (await res.json()) as YahooChartResp;
+  const r = json.chart?.result?.[0];
+  if (!r) {
+    throw new UpstreamError("yahoo", res.status, `Yahoo chart payload for ${symbol} was empty.`);
+  }
+  const ts = r.timestamp || [];
+  const q = r.indicators?.quote?.[0];
+  if (!q) {
+    throw new UpstreamError("yahoo", res.status, `Yahoo chart payload for ${symbol} had no quote series.`);
+  }
+  const bars: ChartBar[] = [];
+  for (let i = 0; i < ts.length; i++) {
+    const o = q.open[i];
+    const h = q.high[i];
+    const l = q.low[i];
+    const c = q.close[i];
+    const v = q.volume[i];
+    if (o == null || h == null || l == null || c == null) continue;
+    bars.push({ t: ts[i], o, h, l, c, v: v ?? 0 });
+  }
+  return {
+    symbol: r.meta.symbol,
+    bars,
+    spot: r.meta.regularMarketPrice,
+    prevClose: r.meta.chartPreviousClose,
+  };
 }
 
 // Derive a quote from the chart endpoint (no crumb required).
 export async function getYahooQuoteFromChart(
   symbol: string,
-): Promise<QuoteSnapshot | null> {
+): Promise<QuoteSnapshot> {
   const chart = await getYahooChart(symbol, "5d", "1d");
-  if (!chart) return null;
   const spot = chart.spot;
   const prevClose = chart.prevClose;
   const change = spot - prevClose;

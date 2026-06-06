@@ -3,6 +3,7 @@
 // For indices CBOE uses an underscore prefix (e.g. _SPX).
 
 import type { OptionChain, OptionContract, QuoteSnapshot } from "./types";
+import { UpstreamError } from "./errors";
 
 const INDEX_SYMBOLS = new Set([
   "SPX", "NDX", "RUT", "VIX", "DJX", "XSP", "OEX", "MXEF", "SPXW",
@@ -66,11 +67,12 @@ function parseOptionSymbol(opt: string): {
   return { root, expiration, side: side as "C" | "P", strike };
 }
 
-async function fetchCboeRaw(symbol: string): Promise<RawCboe | null> {
+async function fetchCboeRaw(symbol: string): Promise<RawCboe> {
   const sym = cboeSymbol(symbol);
   const url = `https://cdn.cboe.com/api/global/delayed_quotes/options/${sym}.json`;
+  let res: Response;
   try {
-    const res = await fetch(url, {
+    res = await fetch(url, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (compatible; AplusOptions/1.0; +https://aplus.example)",
@@ -78,18 +80,37 @@ async function fetchCboeRaw(symbol: string): Promise<RawCboe | null> {
       },
       next: { revalidate: 30 },
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as RawCboe;
-    if (!json?.data?.options) return null;
-    return json;
-  } catch {
-    return null;
+  } catch (e) {
+    throw new UpstreamError(
+      "cboe",
+      0,
+      `CBOE request failed (network/DNS): ${(e as Error).message}`,
+    );
   }
+  if (res.status === 404) {
+    throw new UpstreamError(
+      "cboe",
+      404,
+      `CBOE has no options listing for "${sym}" — symbol not found, delisted, or wrong root (indices need the _ prefix, e.g. _SPX).`,
+    );
+  }
+  if (!res.ok) {
+    throw new UpstreamError("cboe", res.status, `CBOE returned HTTP ${res.status} for ${sym}.`);
+  }
+  let json: RawCboe;
+  try {
+    json = (await res.json()) as RawCboe;
+  } catch {
+    throw new UpstreamError("cboe", res.status, `CBOE returned a non-JSON body for ${sym}.`);
+  }
+  if (!json?.data?.options) {
+    throw new UpstreamError("cboe", res.status, `CBOE payload for ${sym} contained no options array.`);
+  }
+  return json;
 }
 
-export async function getCboeQuote(symbol: string): Promise<QuoteSnapshot | null> {
+export async function getCboeQuote(symbol: string): Promise<QuoteSnapshot> {
   const raw = await fetchCboeRaw(symbol);
-  if (!raw) return null;
   const d = raw.data;
   const spot = d.current_price ?? d.last_trade_price ?? d.close ?? 0;
   const prevClose = d.prev_day_close ?? spot;
@@ -106,9 +127,8 @@ export async function getCboeQuote(symbol: string): Promise<QuoteSnapshot | null
   };
 }
 
-export async function getCboeChain(symbol: string): Promise<OptionChain | null> {
+export async function getCboeChain(symbol: string): Promise<OptionChain> {
   const raw = await fetchCboeRaw(symbol);
-  if (!raw) return null;
   const d = raw.data;
   const spot = d.current_price ?? d.last_trade_price ?? d.close ?? 0;
   const contracts: OptionContract[] = [];

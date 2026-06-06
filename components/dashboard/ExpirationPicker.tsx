@@ -3,56 +3,108 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
+type State =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; list: string[] };
+
+function dte(exp: string): number {
+  const [y, m, d] = exp.split("-").map(Number);
+  const target = new Date(y, m - 1, d);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / 86_400_000);
+}
+
+function label(exp: string): string {
+  const [y, m, d] = exp.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const sameYear = y === new Date().getFullYear();
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "2-digit" }),
+  });
+}
+
 export default function ExpirationPicker() {
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
   const symbol = sp.get("symbol") || "SPY";
   const exp = sp.get("exp") || "";
-  const [list, setList] = useState<string[]>([]);
+  const [state, setState] = useState<State>({ kind: "loading" });
 
   useEffect(() => {
     let cancelled = false;
+    setState({ kind: "loading" });
     fetch(`/api/expirations?symbol=${encodeURIComponent(symbol)}`)
-      .then((r) => (r.ok ? r.json() : { expirations: [] }))
-      .then((j) => {
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `status ${r.status}`);
+        return (j.expirations as string[]) || [];
+      })
+      .then((exps) => {
         if (cancelled) return;
-        const exps: string[] = j.expirations || [];
-        setList(exps);
+        setState({ kind: "ready", list: exps });
         if (!exp && exps.length > 0) {
           const params = new URLSearchParams(sp.toString());
           params.set("exp", exps[0]);
           router.replace(`${pathname}?${params.toString()}`);
         }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setState({ kind: "error", message: e.message ?? "failed to load expirations" });
       });
     return () => {
       cancelled = true;
     };
   }, [symbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function set(e: string) {
+  function select(e: string) {
     const params = new URLSearchParams(sp.toString());
     params.set("exp", e);
     router.push(`${pathname}?${params.toString()}`);
   }
 
-  if (list.length === 0)
-    return <span className="label-mono">EXP — loading</span>;
+  if (state.kind === "loading")
+    return <span className="label-mono">EXP — loading…</span>;
+
+  if (state.kind === "error")
+    return <span className="label-mono text-bear">EXP — {state.message}</span>;
+
+  if (state.list.length === 0)
+    return <span className="label-mono">EXP — none listed</span>;
 
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <span className="label-mono">EXP</span>
-      <select
-        value={exp}
-        onChange={(e) => set(e.target.value)}
-        className="bg-ink-850 border border-white/10 rounded-md font-mono text-xs tracking-wider px-2 py-1.5 text-white outline-none focus:border-white/30"
-      >
-        {list.map((e) => (
-          <option key={e} value={e} className="bg-ink-850">
-            {e}
-          </option>
-        ))}
-      </select>
+    <div className="flex items-center gap-2 min-w-0">
+      <span className="label-mono shrink-0">EXP</span>
+      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+        {state.list.map((e) => {
+          const active = e === exp;
+          const days = dte(e);
+          const tag = days <= 0 ? "0DTE" : `${days}d`;
+          return (
+            <button
+              key={e}
+              onClick={() => select(e)}
+              title={`${e} · ${days <= 0 ? "expires today" : `${days} days to expiry`}`}
+              className={[
+                "shrink-0 rounded-md px-2.5 py-1.5 border font-mono text-xs tracking-wider transition-colors",
+                active
+                  ? "bg-white text-ink-950 border-transparent"
+                  : "bg-ink-850 text-ink-200 border-white/10 hover:border-white/30 hover:text-white",
+              ].join(" ")}
+            >
+              <span>{label(e)}</span>
+              <span className={`ml-1.5 text-[10px] ${active ? "text-ink-500" : "text-ink-400"}`}>
+                {tag}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

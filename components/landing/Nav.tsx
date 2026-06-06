@@ -4,7 +4,6 @@ const links = [
   { label: "Product", href: "#product" },
   { label: "Data", href: "#data" },
   { label: "Pricing", href: "#pricing" },
-  { label: "Docs", href: "#docs" },
 ];
 
 export default function Nav() {
