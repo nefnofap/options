@@ -19,6 +19,7 @@ const TABS: { slug: string; label: string }[] = [
   { slug: "chart", label: "Chart" },
   { slug: "macro", label: "Macro" },
   { slug: "news", label: "News" },
+  { slug: "convert", label: "Convert" },
 ];
 
 export default function TabNav() {

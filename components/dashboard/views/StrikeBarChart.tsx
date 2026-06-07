@@ -33,33 +33,21 @@ interface Props {
   tooltipLabel: string;
   valueFormatter?: (v: number) => string;
   height?: number;
+  /** Strikes to outline as absorption walls (high |gamma|). */
+  absorption?: number[];
   /** Brush window resets when this changes (e.g. `${symbol}|${exp}|${metric}`). */
   resetKey?: string;
 }
 
 const POS = "#5fd39a";
 const NEG = "#f06a7a";
-const WINDOW = 41; // strikes shown by default, centred on spot
 
-function defaultWindow(data: StrikeDatum[], spot?: number) {
+// Default to showing the WHOLE series — every bar, positive and negative.
+// The range slider then narrows it, and the bars auto-resize to fill the width.
+function defaultWindow(data: StrikeDatum[]) {
   const n = data.length;
   if (n === 0) return { startIndex: 0, endIndex: 0 };
-  const size = Math.min(n, WINDOW);
-  let center = Math.floor(n / 2);
-  if (typeof spot === "number") {
-    let best = Infinity;
-    data.forEach((d, i) => {
-      const dist = Math.abs(d.strike - spot);
-      if (dist < best) {
-        best = dist;
-        center = i;
-      }
-    });
-  }
-  let start = Math.max(0, center - Math.floor(size / 2));
-  const end = Math.min(n - 1, start + size - 1);
-  start = Math.max(0, end - size + 1);
-  return { startIndex: start, endIndex: end };
+  return { startIndex: 0, endIndex: n - 1 };
 }
 
 export default function StrikeBarChart({
@@ -69,14 +57,15 @@ export default function StrikeBarChart({
   tooltipLabel,
   valueFormatter = (v) => `$${fmtCompact(v)}`,
   height = 440,
+  absorption = [],
   resetKey,
 }: Props) {
-  const [range, setRange] = useState(() => defaultWindow(data, spot));
+  const [range, setRange] = useState(() => defaultWindow(data));
 
   // Reset the brush window only when the underlying series changes
   // (new symbol / expiration / metric) — NOT on every auto-refresh.
   useEffect(() => {
-    setRange(defaultWindow(data, spot));
+    setRange(defaultWindow(data));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey]);
 
@@ -84,18 +73,32 @@ export default function StrikeBarChart({
   const end = Math.min(range.endIndex, Math.max(0, data.length - 1));
   const start = Math.min(range.startIndex, end);
 
-  // Symmetric domain over the VISIBLE window: 0.0 stays dead-centre while
-  // zooming, and bars stay readable instead of being dwarfed by the ATM peak.
-  const max = useMemo(() => {
+  // Auto-fit the Y domain to the VISIBLE window's actual min/max (with a little
+  // padding). Zero is always included so the baseline shows, but it is NOT
+  // forced to the centre — the axis tracks the real magnitudes of the bars.
+  const domain = useMemo<[number, number]>(() => {
     const slice = data.slice(start, end + 1);
-    const m = slice.reduce((acc, d) => Math.max(acc, Math.abs(d.value)), 0);
-    return m > 0 ? m : 1;
+    let lo = 0;
+    let hi = 0;
+    for (const d of slice) {
+      if (d.value < lo) lo = d.value;
+      if (d.value > hi) hi = d.value;
+    }
+    if (lo === 0 && hi === 0) return [-1, 1];
+    const pad = (hi - lo) * 0.06 || 1;
+    return [lo - pad, hi + pad];
   }, [data, start, end]);
+
+  const absSet = useMemo(() => new Set(absorption.map((a) => Math.round(a))), [absorption]);
 
   return (
     <div style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 12, right: 8, bottom: 0, left: 0 }}>
+        <BarChart
+          data={data}
+          margin={{ top: 12, right: 8, bottom: 0, left: 0 }}
+          barCategoryGap="6%"
+        >
           <CartesianGrid stroke="rgba(255,255,255,0.05)" vertical={false} />
           <XAxis
             dataKey="strike"
@@ -105,7 +108,7 @@ export default function StrikeBarChart({
             tickFormatter={(v) => fmtNumber(v, 0)}
           />
           <YAxis
-            domain={[-max, max]}
+            domain={domain}
             stroke="#5a5a66"
             tickLine={false}
             fontSize={10}
@@ -145,9 +148,31 @@ export default function StrikeBarChart({
             dataKey="value"
             isAnimationActive={false}
             shape={(props: any) => {
-              const { x, y, width, height, value } = props;
+              const { x, width, value } = props;
+              // Recharts hands a NEGATIVE height for below-zero bars; an SVG
+              // rect won't render that. Normalise so negatives draw correctly.
+              let { y, height: h } = props;
+              if (h < 0) {
+                y = y + h;
+                h = -h;
+              }
               const fill = (value as number) >= 0 ? POS : NEG;
-              return <rect x={x} y={y} width={width} height={height} fill={fill} opacity={0.85} />;
+              // Small horizontal inset leaves a "border" between adjacent bars.
+              const inset = Math.min(width * 0.12, 2);
+              const isWall = absSet.has(Math.round(props.strike ?? props.payload?.strike));
+              return (
+                <rect
+                  x={x + inset}
+                  y={y}
+                  width={Math.max(1, width - inset * 2)}
+                  height={Math.max(0, h)}
+                  rx={1}
+                  fill={fill}
+                  opacity={isWall ? 1 : 0.85}
+                  stroke={isWall ? "#e8c15f" : "none"}
+                  strokeWidth={isWall ? 1.4 : 0}
+                />
+              );
             }}
           />
           <Brush
