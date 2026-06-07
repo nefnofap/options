@@ -4,6 +4,7 @@
 import { getCboeChain, getCboeQuote } from "./cboe";
 import { getYahooChart, getYahooNews, getYahooQuoteFromChart } from "./yahoo";
 import { UpstreamError } from "./errors";
+import { cacheGet, cacheSet, cachePeek } from "./cache";
 import type { ChartBar, NewsItem, OptionChain, QuoteSnapshot } from "./types";
 
 function reason(provider: string, e: unknown): string {
@@ -39,12 +40,35 @@ export async function getChain(symbol: string): Promise<OptionChain> {
   return getCboeChain(symbol);
 }
 
+export interface ChartResult {
+  symbol: string;
+  bars: ChartBar[];
+  spot: number;
+  prevClose: number;
+  stale?: boolean;
+}
+
+const CHART_TTL = 60_000;
+
 export async function getChart(
   symbol: string,
   range: "1d" | "5d" | "1mo" | "3mo" | "6mo" | "1y" | "5y" = "3mo",
   interval: "1m" | "5m" | "15m" | "1h" | "1d" | "1wk" = "1d",
-): Promise<{ symbol: string; bars: ChartBar[]; spot: number; prevClose: number }> {
-  return getYahooChart(symbol, range, interval);
+): Promise<ChartResult> {
+  const key = `chart:${symbol.toUpperCase()}:${range}:${interval}`;
+  const fresh = cacheGet<ChartResult>(key, CHART_TTL);
+  if (fresh) return { ...fresh, stale: false };
+  try {
+    const data = await getYahooChart(symbol, range, interval);
+    cacheSet(key, data);
+    return { ...data, stale: false };
+  } catch (e) {
+    // Throttled or upstream down: serve the last good data (stale) if we have
+    // any, so the chart stays populated instead of erroring out on a 429.
+    const stale = cachePeek<ChartResult>(key);
+    if (stale) return { ...stale, stale: true };
+    throw e;
+  }
 }
 
 export async function getNews(symbol: string): Promise<NewsItem[]> {

@@ -36,6 +36,7 @@ export default function ChartView() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [stale, setStale] = useState(false);
   const [brush, setBrush] = useState<{ s: number; e: number } | null>(null);
 
   useEffect(() => {
@@ -60,6 +61,7 @@ export default function ChartView() {
         const j = await r.json();
         if (cancelled) return;
         setBars(j.bars || []);
+        setStale(!!j.stale);
         setError(null);
         setUpdatedAt(Date.now());
       } catch (e) {
@@ -112,7 +114,7 @@ export default function ChartView() {
           <h3 className="display-italic text-2xl text-white">Price</h3>
           <div className="flex items-center gap-4">
             <span className="label-mono">via Yahoo · {bars.length} bars</span>
-            <LiveBadge updatedAt={updatedAt} refreshing={refreshing} stale={!!error && bars.length > 0} />
+            <LiveBadge updatedAt={updatedAt} refreshing={refreshing} stale={stale || (!!error && bars.length > 0)} />
           </div>
         </div>
         {loading && <div className="label-mono py-16 text-center">loading</div>}
