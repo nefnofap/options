@@ -8,6 +8,8 @@ type State =
   | { kind: "error"; message: string }
   | { kind: "ready"; list: string[] };
 
+const NEAR_DTE = 7; // pills for 0–7 DTE; everything beyond goes in the dropdown
+
 function dte(exp: string): number {
   const [y, m, d] = exp.split("-").map(Number);
   const target = new Date(y, m - 1, d);
@@ -70,41 +72,65 @@ export default function ExpirationPicker() {
 
   if (state.kind === "loading")
     return <span className="label-mono">EXP — loading…</span>;
-
   if (state.kind === "error")
     return <span className="label-mono text-bear">EXP — {state.message}</span>;
-
   if (state.list.length === 0)
     return <span className="label-mono">EXP — none listed</span>;
 
+  const near = state.list.filter((e) => dte(e) <= NEAR_DTE);
+  const far = state.list.filter((e) => dte(e) > NEAR_DTE);
+  const farSelected = far.includes(exp);
+
   return (
-    <div className="flex items-center gap-2 min-w-0">
+    <div className="flex items-center gap-2 flex-wrap min-w-0">
       <span className="label-mono shrink-0">EXP</span>
-      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-        {state.list.map((e) => {
-          const active = e === exp;
-          const days = dte(e);
-          const tag = days <= 0 ? "0DTE" : `${days}d`;
-          return (
-            <button
-              key={e}
-              onClick={() => select(e)}
-              title={`${e} · ${days <= 0 ? "expires today" : `${days} days to expiry`}`}
-              className={[
-                "shrink-0 rounded-md px-2.5 py-1.5 border font-mono text-xs tracking-wider transition-colors",
-                active
-                  ? "bg-white text-ink-950 border-transparent"
-                  : "bg-ink-850 text-ink-200 border-white/10 hover:border-white/30 hover:text-white",
-              ].join(" ")}
-            >
-              <span>{label(e)}</span>
-              <span className={`ml-1.5 text-[10px] ${active ? "text-ink-500" : "text-ink-400"}`}>
-                {tag}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+
+      {near.map((e) => {
+        const active = e === exp;
+        const days = dte(e);
+        const tag = days <= 0 ? "0DTE" : `${days}d`;
+        return (
+          <button
+            key={e}
+            onClick={() => select(e)}
+            title={`${e} · ${days <= 0 ? "expires today" : `${days} days to expiry`}`}
+            className={[
+              "shrink-0 rounded-md px-2.5 py-1.5 border font-mono text-xs tracking-wider transition-colors",
+              active
+                ? "bg-white text-ink-950 border-transparent"
+                : "bg-ink-850 text-ink-200 border-white/10 hover:border-white/30 hover:text-white",
+            ].join(" ")}
+          >
+            <span>{label(e)}</span>
+            <span className={`ml-1.5 text-[10px] ${active ? "text-ink-500" : "text-ink-400"}`}>
+              {tag}
+            </span>
+          </button>
+        );
+      })}
+
+      {far.length > 0 && (
+        <select
+          value={farSelected ? exp : ""}
+          onChange={(ev) => ev.target.value && select(ev.target.value)}
+          title="Later expirations"
+          className={[
+            "shrink-0 rounded-md px-2.5 py-1.5 border font-mono text-xs tracking-wider transition-colors cursor-pointer outline-none",
+            farSelected
+              ? "bg-white text-ink-950 border-transparent"
+              : "bg-ink-850 text-ink-200 border-white/10 hover:border-white/30 hover:text-white",
+          ].join(" ")}
+        >
+          <option value="" disabled>
+            {farSelected ? `${label(exp)} · ${dte(exp)}d` : `+${far.length} more…`}
+          </option>
+          {far.map((e) => (
+            <option key={e} value={e} className="bg-ink-900 text-ink-100">
+              {label(e)} · {dte(e)}d
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

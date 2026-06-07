@@ -19,7 +19,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <Suspense fallback={<span className="label-mono">loading</span>}>
             <TickerSearch />
           </Suspense>
-          <div className="ml-auto label-mono">DELAYED · CBOE / YAHOO</div>
         </div>
         <Suspense fallback={null}>
           <TabNav />
