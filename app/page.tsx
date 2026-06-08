@@ -1,17 +1,13 @@
-import Nav from "@/components/landing/Nav";
-import Hero from "@/components/landing/Hero";
-import Features from "@/components/landing/Features";
-import LogoStrip from "@/components/landing/LogoStrip";
-import Footer from "@/components/landing/Footer";
+// Home page = the login screen. Already-signed-in members skip straight to the
+// app; signed-in non-members are sent to the join-the-Discord page.
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
+import LoginScreen from "@/components/auth/LoginScreen";
 
-export default function Page() {
-  return (
-    <main className="relative">
-      <Nav />
-      <Hero />
-      <LogoStrip />
-      <Features />
-      <Footer />
-    </main>
-  );
+export default async function Page() {
+  const session = await auth();
+  if (session?.user) {
+    redirect(session.user.inGuild ? "/dashboard" : "/denied");
+  }
+  return <LoginScreen />;
 }

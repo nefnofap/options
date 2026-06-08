@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useSession } from "next-auth/react";
 
 const TABS: { slug: string; label: string; locked?: boolean }[] = [
   { slug: "macro", label: "Macro" },
@@ -13,6 +14,8 @@ const TABS: { slug: string; label: string; locked?: boolean }[] = [
 
 export default function IntelNav() {
   const pathname = usePathname();
+  const { data: session } = useSession();
+  const isPremium = session?.user?.tier === "premium";
   return (
     <div className="border-b border-white/5 overflow-x-auto">
       <nav className="flex items-center gap-0 min-w-max px-6">
@@ -28,7 +31,7 @@ export default function IntelNav() {
               }`}
             >
               {t.label}
-              {t.locked && <span className="ml-1.5 text-[9px] align-top">🔒</span>}
+              {t.locked && !isPremium && <span className="ml-1.5 text-[9px] align-top">🔒</span>}
               {active && <span className="absolute left-3 right-3 -bottom-px h-px bg-white" />}
             </Link>
           );

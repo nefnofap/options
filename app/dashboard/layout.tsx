@@ -1,16 +1,24 @@
 import Link from "next/link";
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
 import TabNav from "@/components/dashboard/TabNav";
 import TickerSearch from "@/components/dashboard/TickerSearch";
-import PaywallGate from "@/components/intel/PaywallGate";
+import UserMenu from "@/components/auth/UserMenu";
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
+  // Defense in depth: middleware already guards this route, but we re-check here
+  // and also use the session to render the account chrome + drive tier gating.
+  const session = await auth();
+  if (!session?.user) redirect("/");
+  if (!session.user.inGuild) redirect("/denied");
+
   return (
     <main className="min-h-screen bg-ink-950">
       {/* top bar */}
       <header className="sticky top-0 z-40 backdrop-blur bg-ink-950/85 border-b border-white/5">
         <div className="px-6 py-3 flex items-center gap-6">
-          <Link href="/" className="flex items-center gap-2">
+          <Link href="/dashboard" className="flex items-center gap-2">
             <span className="display-italic text-xl text-white leading-none">A+</span>
             <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-ink-200">
               Aplus
@@ -27,15 +35,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           >
             Intel →
           </Link>
+          <UserMenu
+            name={session.user.name ?? null}
+            image={session.user.image ?? null}
+            tier={session.user.tier}
+          />
         </div>
         <Suspense fallback={null}>
           <TabNav />
         </Suspense>
       </header>
 
-      <div className="px-6 py-8">
-        <PaywallGate title="Aplus Options Dashboard">{children}</PaywallGate>
-      </div>
+      <div className="px-6 py-8">{children}</div>
     </main>
   );
 }

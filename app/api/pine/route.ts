@@ -8,11 +8,15 @@ import { strikeAggregates, gammaFlip, maxPain } from "@/lib/analytics";
 import { absorptionProfile } from "@/lib/regime";
 import { generatePineScript } from "@/lib/pine";
 import { describeError, httpStatusFor } from "@/lib/errors";
+import { requirePremium } from "@/lib/auth/guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
+  const denied = await requirePremium();
+  if (denied) return denied;
+
   const symbol = req.nextUrl.searchParams.get("symbol");
   const exp = req.nextUrl.searchParams.get("exp") || undefined;
   if (!symbol) return NextResponse.json({ error: "missing symbol" }, { status: 400 });

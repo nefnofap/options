@@ -16,10 +16,38 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Access — Discord login
+
+The whole app is behind **Discord login** (Auth.js / NextAuth v5). The home page
+(`/`) is the login screen.
+
+- **You can only sign in if you're a member of the configured Discord server.**
+  Signed-in non-members are sent to `/denied` (a join-the-server prompt) and see
+  no app content.
+- **Free tier** (any guild member): the full options dashboard + Intel **Macro**
+  and **News Bias**.
+- **Premium tier** (guild member who also holds the premium role): everything
+  free, plus the rest of Intel (Pre-Market Brief, Instruments, Impact Matrix),
+  the **Pine export**, and the **GEX levels** read.
+
+### Discord setup
+
+1. Create an app at <https://discord.com/developers/applications> → **OAuth2**.
+2. Add a redirect URI: `http://localhost:3000/api/auth/callback/discord`
+   (and your production URL).
+3. Copy the **Client ID/Secret** into `AUTH_DISCORD_ID` / `AUTH_DISCORD_SECRET`.
+4. With Discord Developer Mode on, copy your **Server ID** → `DISCORD_GUILD_ID`
+   and the **premium role ID** → `DISCORD_PREMIUM_ROLE_ID`.
+5. Set `AUTH_SECRET` (`openssl rand -base64 32`). In production also set
+   `AUTH_URL` to your site URL.
+
+Membership + role are read once at sign-in via the `guilds.members.read` scope
+(no bot token needed) and cached on the session JWT.
+
 ## Intel section (`/intel`)
 
 A market-intelligence area layered on top of the options dashboard. Two pages
-are **free**; three are **premium ($10.99/mo — "contact owner to purchase")**.
+are **free**; three are **premium** (granted by the Discord premium role).
 
 | Page | Tier | Source |
 |------|------|--------|
@@ -34,10 +62,11 @@ are **free**; three are **premium ($10.99/mo — "contact owner to purchase")**.
 
 ### Premium gate
 
-Premium pages are wrapped in `<PaywallGate>`. A buyer contacts the owner, gets an
-access code, and enters it once; it's verified server-side at `/api/intel/unlock`
-against `INTEL_ACCESS_CODE` and an unlock flag is stored in the browser's
-`localStorage`. If `INTEL_ACCESS_CODE` is unset, premium pages stay locked.
+Tiers are derived from Discord roles (see **Access** above). Premium pages render
+a `<PremiumLock>` upsell for free members; the embedded premium features (Pine
+export, GEX levels) use a client `<PremiumGate>`. The premium API routes
+(`/api/intel/brief`, `/api/intel/instruments`, `/api/pine`) also enforce the tier
+server-side, so the data can't be fetched directly by free accounts.
 
 ### Configuration
 

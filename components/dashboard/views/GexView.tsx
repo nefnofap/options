@@ -11,6 +11,7 @@ import ExpirationPicker from "../ExpirationPicker";
 import LiveBadge from "../LiveBadge";
 import StrikeBarChart, { type RefMarker } from "./StrikeBarChart";
 import PineExportButton from "./PineExportButton";
+import PremiumGate from "@/components/auth/PremiumGate";
 import { fmtCompact, fmtMoney } from "@/lib/format";
 
 const TONE_CLS: Record<string, string> = {
@@ -133,6 +134,7 @@ export default function GexView() {
 
       {/* Reversal & continuation zones — in-depth, directional read per level */}
       {zones.length > 0 && (
+        <PremiumGate variant="block" label="Levels · reversals & continuation">
         <section className="panel p-5">
           <div className="flex items-baseline justify-between gap-4 flex-wrap mb-1">
             <div className="label-mono">levels · possible reversals & continuation</div>
@@ -186,6 +188,7 @@ export default function GexView() {
             relative conviction (gamma concentration × proximity). Not financial advice.
           </p>
         </section>
+        </PremiumGate>
       )}
 
       <section className="panel p-5">
@@ -199,7 +202,9 @@ export default function GexView() {
               </span>
             )}
             <span className="label-mono">{exp ? `EXP ${exp}` : "all expirations"}</span>
-            <PineExportButton symbol={symbol} exp={exp} />
+            <PremiumGate variant="inline" label="Pine export">
+              <PineExportButton symbol={symbol} exp={exp} />
+            </PremiumGate>
             <LiveBadge updatedAt={updatedAt} refreshing={refreshing} stale={!!error && !!chain} />
           </div>
         </div>
