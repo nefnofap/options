@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 const STORE_KEY = "intel_unlocked";
+const EXPIRES_KEY = "intel_unlocked_expires";
 const PRICE = "$10.99/mo";
 const CONTACT_DISCORD = "https://discord.com/invite/MSXdaexYdH";
 const CONTACT_GITHUB = "https://github.com/nefnofap";
@@ -26,7 +27,23 @@ export default function PaywallGate({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setUnlocked(localStorage.getItem(STORE_KEY) === "1");
+    if (localStorage.getItem(STORE_KEY) !== "1") {
+      setUnlocked(false);
+      return;
+    }
+    // A stored expiry means this was a 7-day trial code; re-lock once it passes.
+    // No expiry stored (or "never") means a permanent code — stays unlocked.
+    const exp = localStorage.getItem(EXPIRES_KEY);
+    if (exp && exp !== "never") {
+      const ts = Number(exp);
+      if (!Number.isFinite(ts) || Date.now() > ts) {
+        localStorage.removeItem(STORE_KEY);
+        localStorage.removeItem(EXPIRES_KEY);
+        setUnlocked(false);
+        return;
+      }
+    }
+    setUnlocked(true);
   }, []);
 
   async function submit(e: React.FormEvent) {
@@ -39,9 +56,17 @@ export default function PaywallGate({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code }),
       });
-      const json = (await res.json()) as { ok: boolean; error?: string };
+      const json = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        expiresAt?: number | null;
+      };
       if (json.ok) {
         localStorage.setItem(STORE_KEY, "1");
+        localStorage.setItem(
+          EXPIRES_KEY,
+          json.expiresAt == null ? "never" : String(json.expiresAt),
+        );
         setUnlocked(true);
       } else {
         setError(json.error ?? "Invalid access code.");

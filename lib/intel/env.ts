@@ -16,6 +16,9 @@ export const env = {
   econpulse: () => read("ECONPULSE_KEY") || "demo",
   apify: () => read("APIFY_TOKEN"),
   accessCode: () => read("INTEL_ACCESS_CODE"),
+  // Permanent premium key. Defaults to "luciipremium" so the deploy is locked
+  // out of the box; override by setting INTEL_ACCESS_CODE_PERMANENT in Vercel.
+  accessCodePermanent: () => read("INTEL_ACCESS_CODE_PERMANENT") || "luciipremium",
 };
 
 /** A standard "this feature needs a key" payload used across providers. */

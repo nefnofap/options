@@ -158,3 +158,205 @@ export function absorptionProfile(
   }
   return { strikes, callWall, putWall };
 }
+
+// ── Reversal zones ───────────────────────────────────────────────────────────
+// Price levels where dealer mechanics make a turn, a stall, or an acceleration
+// more likely. Each carries an in-depth, directional read so the UI can say
+// "price might reverse here / consolidate / keep going" instead of a bare line.
+
+export type ReversalKind =
+  | "resistance" // expect rejection / fade from above
+  | "support" // expect a bounce from below
+  | "pivot" // regime line — character changes across it
+  | "magnet" // price gets pinned / drawn in
+  | "breakout"; // beyond this, moves self-reinforce
+
+export type ReversalBias =
+  | "reverse-down"
+  | "reverse-up"
+  | "consolidate"
+  | "breakout-up"
+  | "breakout-down";
+
+export interface ReversalZone {
+  price: number;
+  kind: ReversalKind;
+  bias: ReversalBias;
+  /** Short chart label, e.g. "Call Wall — fade". */
+  label: string;
+  /** Headline shown in the insight card. */
+  title: string;
+  /** In-depth, plain-English mechanics + what price might do. */
+  detail: string;
+  /** Rough conviction 0–1 from |gamma| concentration and proximity to spot. */
+  strength: number;
+}
+
+const pct = (a: number, b: number) => (b === 0 ? 0 : ((a - b) / b) * 100);
+
+/**
+ * Derive reversal/continuation zones from the gamma structure. `longGamma` is
+ * total-net-gamma ≥ 0 (dealers dampen) vs short (dealers amplify) — it flips the
+ * meaning of every wall, so the narratives below are conditioned on it.
+ */
+export function reversalZones(
+  aggs: StrikeAggregate[],
+  spot: number | undefined,
+  flip: number | null,
+  pain: number | null,
+): ReversalZone[] {
+  if (aggs.length === 0 || spot == null) return [];
+  const { callWall, putWall, strikes } = absorptionProfile(aggs, spot);
+  const totalGamma = aggs.reduce((a, s) => a + s.netGammaNotional, 0);
+  const longGamma = totalGamma >= 0;
+  const maxAbs = aggs.reduce((m, a) => Math.max(m, Math.abs(a.netGammaNotional)), 0) || 1;
+
+  const gammaAt = (strike: number) => {
+    const hit = aggs.find((a) => a.strike === strike);
+    return hit ? Math.abs(hit.netGammaNotional) : 0;
+  };
+  // Strength blends gamma concentration with closeness to spot (nearer = sharper).
+  const strengthFor = (strike: number) => {
+    const conc = gammaAt(strike) / maxAbs;
+    const near = Math.exp(-Math.pow((strike - spot) / Math.max(spot * 0.03, 1), 2));
+    return Math.min(1, 0.45 * conc + 0.55 * near);
+  };
+
+  const zones: ReversalZone[] = [];
+
+  // Call Wall — the dominant positive-gamma strike above spot.
+  if (callWall != null && callWall > spot) {
+    const d = pct(callWall, spot);
+    if (longGamma) {
+      zones.push({
+        price: callWall,
+        kind: "resistance",
+        bias: "reverse-down",
+        label: "Call Wall — fade",
+        title: "Call Wall · likely rejection",
+        detail:
+          `Heaviest positive gamma sits ${d.toFixed(1)}% up at the Call Wall. In long-gamma, ` +
+          `dealers sell into strength as price approaches, so this often caps the move: expect a ` +
+          `stall or a fade back toward the flip. A clean close above flips it from a ceiling to a ` +
+          `launch pad — until then, treat it as the top of the range.`,
+        strength: strengthFor(callWall),
+      });
+    } else {
+      zones.push({
+        price: callWall,
+        kind: "breakout",
+        bias: "breakout-up",
+        label: "Call Wall — breach = chase",
+        title: "Call Wall · breach triggers upside chase",
+        detail:
+          `Short gamma above the flip: if spot clears the Call Wall ${d.toFixed(1)}% up, dealers must ` +
+          `buy into strength — a self-reinforcing upside chase. Below it, the same wall acts as a ` +
+          `magnet/resistance and price may reverse down first. The breach is the tell: reject = fade, ` +
+          `accept above = squeeze.`,
+        strength: strengthFor(callWall),
+      });
+    }
+  }
+
+  // Put Wall — the dominant negative-gamma strike below spot.
+  if (putWall != null && putWall < spot) {
+    const d = pct(spot, putWall);
+    if (longGamma) {
+      zones.push({
+        price: putWall,
+        kind: "support",
+        bias: "reverse-up",
+        title: "Put Wall · likely bounce",
+        label: "Put Wall — bounce",
+        detail:
+          `Largest hedging support sits ${d.toFixed(1)}% down at the Put Wall. In long-gamma dealers ` +
+          `buy weakness into this level, so dips here tend to be bought — expect a bounce or at least ` +
+          `a pause. Only a decisive break below opens an air pocket toward the next strike.`,
+        strength: strengthFor(putWall),
+      });
+    } else {
+      zones.push({
+        price: putWall,
+        kind: "breakout",
+        bias: "breakout-down",
+        title: "Put Wall · break = flush",
+        label: "Put Wall — break = flush",
+        detail:
+          `Short gamma below the flip: losing the Put Wall ${d.toFixed(1)}% down forces dealers to sell ` +
+          `into weakness — an accelerating flush with no mechanical floor until the next strike. While ` +
+          `it holds, expect sharp reflex bounces off it; the break is where downside gets violent.`,
+        strength: strengthFor(putWall),
+      });
+    }
+  }
+
+  // Gamma flip — the regime pivot.
+  if (flip != null) {
+    const above = spot > flip;
+    const d = pct(spot, flip);
+    zones.push({
+      price: flip,
+      kind: "pivot",
+      bias: "consolidate",
+      title: above ? "Gamma Flip · support pivot" : "Gamma Flip · reclaim line",
+      label: "Gamma Flip — regime pivot",
+      detail: above
+        ? `Spot is ${Math.abs(d).toFixed(1)}% above the flip, in the stabilising (long-gamma) zone — ` +
+          `pullbacks toward it usually get absorbed and reverse up. Lose the flip and the character ` +
+          `changes: volatility expands and dips stop holding. Watch it as the line between "buy the ` +
+          `dip" and "respect the downside."`
+        : `Spot is ${Math.abs(d).toFixed(1)}% below the flip, in the unstable (short-gamma) zone where ` +
+          `moves amplify both ways and price tends to whip. Reclaiming the flip flips dealers back to ` +
+          `dampening and often marks the reversal up; until then, rallies are suspect and can fail fast.`,
+      strength: 0.6,
+    });
+  }
+
+  // Max pain — the expiry magnet.
+  if (pain != null) {
+    const d = pct(pain, spot);
+    const near = Math.abs(d) < 1.2;
+    zones.push({
+      price: pain,
+      kind: "magnet",
+      bias: "consolidate",
+      title: near ? "Max Pain · pinning here" : "Max Pain · drift target",
+      label: "Max Pain — magnet",
+      detail: near
+        ? `Spot is right at max pain — the strike where the most option value expires worthless. Into ` +
+          `expiry, dealer hedging tends to pin price here, so expect chop / consolidation and fading of ` +
+          `extremes rather than a clean trend.`
+        : `Max pain sits ${Math.abs(d).toFixed(1)}% ${d >= 0 ? "above" : "below"} spot. As expiry nears, ` +
+          `pinning flows often drift price toward it, so it can act as a soft ${d >= 0 ? "upside" : "downside"} ` +
+          `target and a place where a run loses steam and consolidates.`,
+      strength: 0.4,
+    });
+  }
+
+  // Secondary interior walls (absorption strikes not already flagged) — interim
+  // reversal/consolidation shelves between the big levels.
+  const flagged = new Set(zones.map((z) => z.price));
+  for (const strike of strikes) {
+    if (flagged.has(strike) || strike === callWall || strike === putWall) continue;
+    const above = strike > spot;
+    const d = pct(strike, spot);
+    if (Math.abs(d) < 0.15) continue; // skip ~at-the-money noise
+    zones.push({
+      price: strike,
+      kind: above ? "resistance" : "support",
+      bias: "consolidate",
+      title: `Absorption shelf ${d >= 0 ? "+" : ""}${d.toFixed(1)}%`,
+      label: above ? "Absorption — overhead" : "Absorption — below",
+      detail:
+        `Secondary gamma concentration ${Math.abs(d).toFixed(1)}% ${above ? "above" : "below"} spot. ` +
+        `Not the primary wall, but dealer hedging clusters here, so price often pauses or consolidates ` +
+        `at this shelf before deciding — a likely spot for a stall or a minor reversal.`,
+      strength: strengthFor(strike) * 0.7,
+    });
+    flagged.add(strike);
+  }
+
+  return zones
+    .filter((z) => Number.isFinite(z.price))
+    .sort((a, b) => b.price - a.price);
+}

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import IntelNav from "@/components/intel/IntelNav";
+import PaywallGate from "@/components/intel/PaywallGate";
 
 export default function IntelLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -26,7 +27,9 @@ export default function IntelLayout({ children }: { children: React.ReactNode })
         </Suspense>
       </header>
 
-      <div className="px-6 py-8">{children}</div>
+      <div className="px-6 py-8">
+        <PaywallGate title="Aplus Intel">{children}</PaywallGate>
+      </div>
     </main>
   );
 }

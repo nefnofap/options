@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 import TabNav from "@/components/dashboard/TabNav";
 import TickerSearch from "@/components/dashboard/TickerSearch";
+import PaywallGate from "@/components/intel/PaywallGate";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -32,7 +33,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </Suspense>
       </header>
 
-      <div className="px-6 py-8">{children}</div>
+      <div className="px-6 py-8">
+        <PaywallGate title="Aplus Options Dashboard">{children}</PaywallGate>
+      </div>
     </main>
   );
 }

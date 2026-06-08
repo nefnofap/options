@@ -3,19 +3,29 @@
 import { useSearchParams } from "next/navigation";
 import { useChain } from "../useChain";
 import { strikeAggregates, gammaFlip, maxPain } from "@/lib/analytics";
-import { interpretRegime, absorptionProfile } from "@/lib/regime";
+import { interpretRegime, absorptionProfile, reversalZones, type ReversalBias } from "@/lib/regime";
 import Stat from "../Stat";
 import EmptyState from "../EmptyState";
 import QuoteHeader from "../QuoteHeader";
 import ExpirationPicker from "../ExpirationPicker";
 import LiveBadge from "../LiveBadge";
 import StrikeBarChart, { type RefMarker } from "./StrikeBarChart";
+import PineExportButton from "./PineExportButton";
 import { fmtCompact, fmtMoney } from "@/lib/format";
 
 const TONE_CLS: Record<string, string> = {
   bull: "text-bull",
   bear: "text-bear",
   neutral: "text-ink-100",
+};
+
+// How each reversal bias renders: accent color + a short directional tag.
+const BIAS_META: Record<ReversalBias, { cls: string; tag: string; dot: string }> = {
+  "reverse-down": { cls: "text-bear", tag: "may reverse down", dot: "#f06a7a" },
+  "reverse-up": { cls: "text-bull", tag: "may reverse up", dot: "#5fd39a" },
+  consolidate: { cls: "text-ink-200", tag: "may consolidate", dot: "#a8a8b3" },
+  "breakout-up": { cls: "text-bull", tag: "breach → upside chase", dot: "#5fd39a" },
+  "breakout-down": { cls: "text-bear", tag: "break → flush", dot: "#f06a7a" },
 };
 
 export default function GexView() {
@@ -31,6 +41,7 @@ export default function GexView() {
 
   const regime = aggs.length > 0 ? interpretRegime(aggs, chain?.spot, flip) : null;
   const absorption = aggs.length > 0 ? absorptionProfile(aggs, chain?.spot) : null;
+  const zones = aggs.length > 0 ? reversalZones(aggs, chain?.spot, flip, pain) : [];
 
   const chartData = aggs.map((a) => ({ strike: a.strike, value: a.netGammaNotional }));
   const markers: RefMarker[] = [];
@@ -120,6 +131,63 @@ export default function GexView() {
         </section>
       )}
 
+      {/* Reversal & continuation zones — in-depth, directional read per level */}
+      {zones.length > 0 && (
+        <section className="panel p-5">
+          <div className="flex items-baseline justify-between gap-4 flex-wrap mb-1">
+            <div className="label-mono">levels · possible reversals & continuation</div>
+            <div className="label-mono text-ink-500">{zones.length} zones</div>
+          </div>
+          <p className="text-sm text-ink-300 mt-1 mb-4 max-w-3xl leading-relaxed">
+            Where dealer mechanics make a turn, a stall, or an acceleration more likely. Each level
+            reads off the live gamma structure — price might reverse, consolidate, or keep running.
+          </p>
+          <div className="grid md:grid-cols-2 gap-3">
+            {zones.map((z) => {
+              const meta = BIAS_META[z.bias];
+              const dist = chain?.spot ? ((z.price - chain.spot) / chain.spot) * 100 : null;
+              return (
+                <div
+                  key={`${z.kind}-${z.price}`}
+                  className="rounded-lg border border-white/10 bg-ink-900/60 p-4"
+                >
+                  <div className="flex items-baseline justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="inline-block h-2 w-2 rounded-full shrink-0"
+                        style={{ backgroundColor: meta.dot }}
+                      />
+                      <span className={`num text-lg ${meta.cls}`}>{fmtMoney(z.price)}</span>
+                      {dist != null && (
+                        <span className="label-mono text-ink-500">
+                          {dist >= 0 ? "+" : ""}
+                          {dist.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                    <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-white/5 ${meta.cls}`}>
+                      {meta.tag}
+                    </span>
+                  </div>
+                  <div className="text-sm text-white mt-2 font-medium">{z.title}</div>
+                  <p className="text-[12.5px] text-ink-300 mt-1 leading-relaxed">{z.detail}</p>
+                  <div className="mt-3 h-1 w-full rounded-full bg-white/5 overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: `${Math.round(z.strength * 100)}%`, backgroundColor: meta.dot }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[11px] text-ink-500 mt-4">
+            Mechanics-based, not predictions — levels move when IV or positioning shifts. The bar shows
+            relative conviction (gamma concentration × proximity). Not financial advice.
+          </p>
+        </section>
+      )}
+
       <section className="panel p-5">
         <div className="flex items-baseline justify-between mb-4 gap-4 flex-wrap">
           <h3 className="display-italic text-2xl text-white">Gamma exposure by strike</h3>
@@ -131,6 +199,7 @@ export default function GexView() {
               </span>
             )}
             <span className="label-mono">{exp ? `EXP ${exp}` : "all expirations"}</span>
+            <PineExportButton symbol={symbol} exp={exp} />
             <LiveBadge updatedAt={updatedAt} refreshing={refreshing} stale={!!error && !!chain} />
           </div>
         </div>
