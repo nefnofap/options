@@ -144,6 +144,7 @@ export function generatePineScript(input: GeneratePineInput): string {
   // lib/regime.ts reversalZones() so the chart reads like the website's insights.
   const callBias = longGamma ? "REJECT/FADE" : "BREACH=CHASE";
   const putBias = longGamma ? "BOUNCE" : "BREAK=FLUSH";
+  const flipBias = longGamma ? "RECLAIM=STABILIZE / LOSE=EXPAND" : "RECLAIM=REVERSE UP";
 
   return `//@version=5
 // ╔══════════════════════════════════════════════════════════════════╗
@@ -154,7 +155,9 @@ export function generatePineScript(input: GeneratePineInput): string {
 // ║  ${familyNote}
 // ║                                                                    ║
 // ║  Dark theme matched to the A+ website. Levels are baked in CASH-   ║
-// ║  INDEX POINTS and auto-scaled to the charted instrument. Paste     ║
+// ║  INDEX POINTS and auto-scaled to the charted instrument. Draws     ║
+// ║  walls / flip / pain / spot + reversal-bias tags and toggleable    ║
+// ║  Fibonacci retracement zones (wall-to-wall & flip-anchored). Paste ║
 // ║  into TradingView → Pine Editor → "Add to chart". Re-export from   ║
 // ║  the app for fresh levels.                                         ║
 // ╚══════════════════════════════════════════════════════════════════╝
@@ -175,8 +178,14 @@ refSym   = input.symbol("${refIndexSymbol}", "Reference cash index", group = "Da
 showBars = input.bool(true,  "Show GEX profile bars", group = "Display")
 showKey  = input.bool(true,  "Show key levels (flip / walls / pain)", group = "Display")
 showBias = input.bool(true,  "Show reversal bias on walls", group = "Display")
+showSpot = input.bool(true,  "Show spot price line", group = "Display")
 offsetB  = input.int(10, "Bars offset to right",  minval = 0,  maxval = 200, group = "Display")
 maxLen   = input.int(60, "Max bar length (bars)", minval = 5,  maxval = 300, group = "Display")
+
+// ── Retracement zones (Fibonacci) ────────────────────────────────────
+showFibW = input.bool(true,  "Retracement: wall-to-wall fibs", group = "Retracement")
+showFibF = input.bool(false, "Retracement: flip-anchored fibs", group = "Retracement")
+fibCol   = input.color(#c9a24b, "Retracement color", group = "Retracement")
 
 // Paint a dark backdrop so the indicator matches the website regardless of the
 // user's TradingView theme (kept subtle so candles stay readable).
@@ -194,6 +203,7 @@ callPts = ${pineNum(toIdx(input.callWall))}
 putPts  = ${pineNum(toIdx(input.putWall))}
 callBias = "${callBias}"
 putBias  = "${putBias}"
+flipBias = "${flipBias}"
 
 // ── Live scale: index points → charted price ─────────────────────────
 refClose = request.security(refSym, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
@@ -204,6 +214,13 @@ f_sz(s) => s == "tiny" ? size.tiny : s == "normal" ? size.normal : s == "large" 
 var box[]   boxes  = array.new<box>()
 var line[]  lines  = array.new<line>()
 var label[] labels = array.new<label>()
+
+// Fib retracement helpers (global scope — Pine requires it). `rx` is the right
+// edge x; `lines`/`labels`/`fibCol`/`lblSize` are read from global scope.
+f_fib(lo, hi, r) => lo + (hi - lo) * r
+f_fibLine(yp, txt, rx) =>
+    array.push(lines,  line.new(bar_index, yp, rx, yp, color = color.new(fibCol, 20), width = 1, style = line.style_dashed, extend = extend.left))
+    array.push(labels, label.new(rx, yp, txt, style = label.style_label_left, color = color.new(#0b0b0d, 25), textcolor = color.new(fibCol, 10), size = f_sz(lblSize)))
 
 if barstate.islast
     // Clear the previous render so levels track scale / input changes.
@@ -233,8 +250,9 @@ if barstate.islast
     // Key levels — full-width lines + right-edge labels (dark-theme styled).
     if showKey and not na(flipPts)
         y = flipPts * scale
+        bias = showBias ? "  [" + flipBias + "]" : ""
         array.push(lines,  line.new(bar_index, y, rightX, y, color = inkLine, width = 2, style = line.style_solid, extend = extend.left))
-        array.push(labels, label.new(rightX, y, "GAMMA FLIP · pivot " + str.tostring(y, format.mintick), style = label.style_label_left, color = color.new(#0b0b0d, 10), textcolor = inkText, size = f_sz(lblSize)))
+        array.push(labels, label.new(rightX, y, "GAMMA FLIP · pivot " + str.tostring(y, format.mintick) + bias, style = label.style_label_left, color = color.new(#0b0b0d, 10), textcolor = inkText, size = f_sz(lblSize)))
     if showKey and not na(callPts)
         y = callPts * scale
         bias = showBias ? "  [" + callBias + "]" : ""
@@ -249,5 +267,33 @@ if barstate.islast
         y = painPts * scale
         array.push(lines,  line.new(bar_index, y, rightX, y, color = color.new(inkLine, 40), width = 1, style = line.style_dotted, extend = extend.left))
         array.push(labels, label.new(rightX, y, "MAX PAIN · magnet " + str.tostring(y, format.mintick), style = label.style_label_left, color = color.new(#0b0b0d, 20), textcolor = color.new(inkText, 25), size = f_sz(lblSize)))
+
+    // Spot at export time — where the chain was snapped (auto-scaled like the rest).
+    if showSpot and not na(spotPts)
+        y = spotPts * scale
+        array.push(lines,  line.new(bar_index, y, rightX, y, color = color.new(inkText, 30), width = 1, style = line.style_solid, extend = extend.left))
+        array.push(labels, label.new(rightX, y, "SPOT @ export " + str.tostring(y, format.mintick), style = label.style_label_left, color = color.new(#0b0b0d, 15), textcolor = inkText, size = f_sz(lblSize)))
+
+    // ── Retracement zones (Fibonacci) ────────────────────────────────
+    // Fib ratios drawn as dashed lines; price tends to stall/retrace at these.
+    // Wall-to-wall: Put Wall (0%) → Call Wall (100%), the gamma-implied range.
+    if showFibW and not na(callPts) and not na(putPts)
+        lo = putPts * scale
+        hi = callPts * scale
+        f_fibLine(f_fib(lo, hi, 0.382), "RETR 38.2%", rightX)
+        f_fibLine(f_fib(lo, hi, 0.5),   "RETR 50%",   rightX)
+        f_fibLine(f_fib(lo, hi, 0.618), "RETR 61.8%", rightX)
+
+    // Flip-anchored: from the Gamma Flip (0%) out to each wall (100%).
+    if showFibF and not na(flipPts)
+        f0 = flipPts * scale
+        if not na(callPts)
+            hi = callPts * scale
+            f_fibLine(f_fib(f0, hi, 0.382), "FLIP→CW 38.2%", rightX)
+            f_fibLine(f_fib(f0, hi, 0.618), "FLIP→CW 61.8%", rightX)
+        if not na(putPts)
+            lo = putPts * scale
+            f_fibLine(f_fib(f0, lo, 0.382), "FLIP→PW 38.2%", rightX)
+            f_fibLine(f_fib(f0, lo, 0.618), "FLIP→PW 61.8%", rightX)
 `;
 }
