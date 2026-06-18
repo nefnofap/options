@@ -76,6 +76,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
     async session({ session, token }) {
       if (session.user) {
+        session.user.id = token.sub ?? "";
         session.user.inGuild = (token.inGuild as boolean | undefined) ?? false;
         session.user.tier = (token.tier as Tier | undefined) ?? "free";
       }
