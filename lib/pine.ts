@@ -215,8 +215,8 @@ var box[]   boxes  = array.new<box>()
 var line[]  lines  = array.new<line>()
 var label[] labels = array.new<label>()
 
-// Fib retracement helpers (global scope — Pine requires it). `rx` is the right
-// edge x; `lines`/`labels`/`fibCol`/`lblSize` are read from global scope.
+// Fib retracement helpers (global scope — Pine requires it). 'rx' is the right
+// edge x; 'lines'/'labels'/'fibCol'/'lblSize' are read from global scope.
 f_fib(lo, hi, r) => lo + (hi - lo) * r
 f_fibLine(yp, txt, rx) =>
     array.push(lines,  line.new(bar_index, yp, rx, yp, color = color.new(fibCol, 20), width = 1, style = line.style_dashed, extend = extend.left))
