@@ -11,6 +11,7 @@ import ExpirationPicker from "../ExpirationPicker";
 import LiveBadge from "../LiveBadge";
 import StrikeBarChart, { type RefMarker } from "./StrikeBarChart";
 import PineExportButton from "./PineExportButton";
+import QuantowerSetupButton from "./QuantowerSetupButton";
 import PremiumGate from "@/components/auth/PremiumGate";
 import { fmtCompact, fmtMoney } from "@/lib/format";
 
@@ -204,6 +205,7 @@ export default function GexView() {
             <span className="label-mono">{exp ? `EXP ${exp}` : "all expirations"}</span>
             <PremiumGate variant="inline" label="Pine export">
               <PineExportButton symbol={symbol} exp={exp} />
+              <QuantowerSetupButton symbol={symbol} exp={exp} />
             </PremiumGate>
             <LiveBadge updatedAt={updatedAt} refreshing={refreshing} stale={!!error && !!chain} />
           </div>
