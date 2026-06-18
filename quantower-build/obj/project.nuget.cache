@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "dgSpecHash": "iFtd1TyLjKKGpbfRXciccXvlueO0ykTpsgsUFzQpk670Ihx0zO4LY2GBTwHLnTh3TCvJEc9bvEfBMTN0Q/9hdw==",
+  "success": false,
+  "projectFilePath": "C:\\Users\\Jash\\Documents\\options\\quantower-build\\APlus_GEX_Live.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Jash\\.nuget\\packages\\microsoft.netcore.app.ref\\6.0.26\\microsoft.netcore.app.ref.6.0.26.nupkg.sha512",
+    "C:\\Users\\Jash\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\6.0.26\\microsoft.windowsdesktop.app.ref.6.0.26.nupkg.sha512",
+    "C:\\Users\\Jash\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\6.0.26\\microsoft.aspnetcore.app.ref.6.0.26.nupkg.sha512"
+  ],
+  "logs": [
+    {
+      "code": "NU1101",
+      "level": "Error",
+      "message": "Unable to find package TradingPlatform.BusinessLayer. No packages exist with this id in source(s): nuget.org",
+      "libraryId": "TradingPlatform.BusinessLayer",
+      "targetGraphs": [
+        "net6.0-windows7.0"
+      ]
+    }
+  ]
+}
