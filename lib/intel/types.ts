@@ -98,6 +98,66 @@ export interface InstrumentsResult {
   notices: ProviderNotice[];
 }
 
+// ── Market thesis ─────────────────────────────────────────────────────────
+export type Conviction = "high" | "medium" | "low";
+
+// One thematic section of the thesis (weekly, daily, macro, micro, geopolitics…).
+export interface ThesisSection {
+  key: string;
+  title: string;
+  bias: Bias;
+  score: number; // -1 .. +1
+  headline: string; // one-line summary of the section
+  body: string[]; // narrative bullets / paragraphs
+  metrics?: { label: string; value: string; bias?: Bias }[];
+}
+
+// Actionable price geography pulled from our own options chain (zero-key, CBOE).
+export interface ThesisLevels {
+  symbol: string;
+  spot: number | null;
+  gammaFlip: number | null;
+  callWall: number | null;
+  putWall: number | null;
+  maxPain: number | null;
+  resistance: number | null;
+  support: number | null;
+  invalidation: number | null; // level that would void the bottom-line bias
+  dealerRegime: "long" | "short" | null;
+}
+
+export interface CatalystItem {
+  when: string; // date or HH:MM
+  label: string;
+  country: string;
+  importance: number; // 1..3
+}
+
+// One vote in the bottom-line synthesis, surfaced so the call is auditable.
+export interface ThesisSignal {
+  label: string;
+  bias: Bias;
+  weight: number;
+  note: string;
+}
+
+export interface ThesisResult {
+  asOf: string;
+  generatedAt: string;
+  bias: Bias; // bottom-line directional call
+  score: number; // -1 .. +1 weighted vote
+  conviction: number; // 0 .. 100
+  convictionLabel: Conviction;
+  thesis: string; // 2-3 sentence bottom line
+  tldr: string[]; // bullet summary
+  sections: ThesisSection[];
+  levels: ThesisLevels;
+  catalysts: CatalystItem[];
+  headlines: ScoredHeadline[]; // top daily news, with links
+  signals: ThesisSignal[]; // the vote breakdown
+  notices: ProviderNotice[];
+}
+
 // ── Impact matrix ───────────────────────────────────────────────────────────
 export interface ImpactFactor {
   key: string;

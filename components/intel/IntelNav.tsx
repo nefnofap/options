@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 
 const TABS: { slug: string; label: string; locked?: boolean }[] = [
+  { slug: "thesis", label: "Market Thesis", locked: true },
   { slug: "macro", label: "Macro" },
   { slug: "sentiment", label: "News Bias" },
   { slug: "brief", label: "Pre-Market Brief", locked: true },
