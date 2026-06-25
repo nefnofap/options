@@ -11,7 +11,7 @@ import { getChart } from "../data";
 import { getChain } from "../data";
 import { strikeAggregates, gammaFlip, maxPain } from "../analytics";
 import { absorptionProfile } from "../regime";
-import { getMacro, getSentiment } from "./data";
+import { getMacro, getSentiment, getInstruments } from "./data";
 import { calendarToday } from "./tradingeconomics";
 import { assessGeopolitics } from "./geopolitics";
 import { biasOf } from "./sentiment";
@@ -19,6 +19,7 @@ import type { ChartBar } from "../types";
 import type {
   Bias,
   CatalystItem,
+  InstrumentSignal,
   ProviderNotice,
   ScoredHeadline,
   ThesisLevels,
@@ -77,6 +78,39 @@ async function series(symbol: string): Promise<Momentum | null> {
   }
 }
 
+// ── Instrument breadth → market-direction signal ─────────────────────────────
+// Each tracked instrument's OWN bias is mapped to a market-risk polarity: a
+// bullish equity/crypto is risk-on (+), a bullish VIX or dollar is risk-OFF (−),
+// and commodities (ambiguous for equity risk) sit out of the directional vote
+// while still being shown on the board.
+const RISK_POLARITY: Record<string, number> = {
+  SPX: 1, NDX: 1, IXIC: 1, DJI: 1, RUT: 1,
+  BTCUSD: 1, ETHUSD: 1,
+  EURUSD: 0.5, // inverse to the dollar → mildly risk-on
+  USDJPY: 0.5, // yen weakness → carry / risk-on
+  VIX: -1, // rising vol → risk-off
+  DXY: -0.7, // strong dollar → tighter conditions / risk-off
+};
+
+function instrumentBreadth(instruments: InstrumentSignal[]) {
+  let num = 0;
+  let den = 0;
+  let riskUp = 0;
+  let total = 0;
+  for (const it of instruments) {
+    const pol = RISK_POLARITY[it.symbol] ?? 0;
+    if (pol === 0 || it.error) continue; // commodities + failed rows excluded
+    total += 1;
+    const v = biasVal(it.bias);
+    num += v * pol;
+    den += Math.abs(pol);
+    if (v * Math.sign(pol) > 0) riskUp += 1; // instrument is pushing the market risk-on
+  }
+  if (den === 0) return null;
+  const score = Math.max(-1, Math.min(1, num / den));
+  return { score, bias: sign(score), riskUp, total };
+}
+
 // ── Time-windowed sentiment over the scored headline pool ────────────────────
 function windowSentiment(headlines: ScoredHeadline[], hours: number) {
   const cutoff = Date.now() - hours * 3600_000;
@@ -112,7 +146,7 @@ export async function getThesis(): Promise<ThesisResult> {
     btc: "BTC-USD",
   } as const;
 
-  const [sentiment, macro, calRes, chartRes] = await Promise.all([
+  const [sentiment, macro, calRes, chartRes, instRes] = await Promise.all([
     getSentiment().catch(() => null),
     getMacro().catch(() => null),
     calendarToday().catch((e) => {
@@ -120,9 +154,14 @@ export async function getThesis(): Promise<ThesisResult> {
       return [];
     }),
     Promise.all(Object.values(XASSET).map((s) => series(s))),
+    getInstruments().catch(() => null),
   ]);
   if (sentiment) notices.push(...sentiment.notices);
   if (macro) notices.push(...macro.notices);
+  if (instRes) notices.push(...instRes.notices);
+
+  // Polarity-aware breadth across the full 16-instrument board (zero-key).
+  const breadth = instRes ? instrumentBreadth(instRes.instruments) : null;
 
   const keys = Object.keys(XASSET) as (keyof typeof XASSET)[];
   const mom: Record<string, Momentum | null> = {};
@@ -239,9 +278,7 @@ export async function getThesis(): Promise<ThesisResult> {
   {
     const eq = (["spy", "qqq", "dia", "iwm"] as const).map((k) => mom[k]).filter(Boolean) as Momentum[];
     const up = eq.filter((m) => m.bias === "bullish").length;
-    const breadth = eq.length ? up / eq.length : null;
-    const s = eq.length ? avg(eq.map((m) => m.score)) : 0;
-    const b = sign(s);
+    const idxBreadth = eq.length ? up / eq.length : null;
     const small = mom.iwm;
     const big = mom.spy;
     const leadership =
@@ -250,24 +287,35 @@ export async function getThesis(): Promise<ThesisResult> {
           ? "small-caps leading (broadening, risk-on)"
           : "mega-caps leading (narrow, defensive)"
         : "leadership unclear";
+
+    // The directional read is driven by the broad 16-instrument board when it
+    // loaded; otherwise we fall back to the 4-index momentum proxy.
+    const s = breadth ? breadth.score : eq.length ? avg(eq.map((m) => m.score)) : 0;
+    const b = sign(s);
     sections.push({
       key: "micro",
       title: "Micro / Market Structure",
       bias: b,
       score: s,
-      headline: breadth == null
+      headline: breadth
+        ? `Instrument board reads ${b.toUpperCase()} — ${breadth.riskUp}/${breadth.total} risk proxies risk-on aligned.`
+        : idxBreadth == null
         ? `Index technicals unavailable this run.`
-        : `Index trend ${b.toUpperCase()} with ${up}/${eq.length} major benchmarks above trend — ${leadership}.`,
+        : `Index trend ${b.toUpperCase()} with ${up}/${eq.length} benchmarks above trend — ${leadership}.`,
       body: [
-        big ? `SPY ${pct(big.chg5, 1)} (5d), ${big.vsMa20 >= 0 ? "above" : "below"} its 20-day MA by ${pct(big.vsMa20, 1)}.` : `SPY series unavailable.`,
-        mom.qqq ? `QQQ ${pct(mom.qqq.chg5, 1)} (5d) — growth/tech ${mom.qqq.bias}.` : `QQQ series unavailable.`,
-        breadth != null ? `Breadth proxy: ${(breadth * 100).toFixed(0)}% of tracked benchmarks trending up.` : ``,
+        breadth ? `Across the 16-instrument board, ${breadth.riskUp}/${breadth.total} risk assets (equities, crypto, FX vs the dollar; VIX/USD counted inversely) are aligned risk-on.` : ``,
+        big ? `SPY ${pct(big.chg5, 1)} (5d), ${big.vsMa20 >= 0 ? "above" : "below"} its 20-day MA by ${pct(big.vsMa20, 1)} — ${leadership}.` : `SPY series unavailable.`,
+        mom.qqq ? `QQQ ${pct(mom.qqq.chg5, 1)} (5d) — growth/tech ${mom.qqq.bias}.` : ``,
       ].filter(Boolean),
       metrics: (["spy", "qqq", "dia", "iwm"] as const)
         .filter((k) => mom[k])
         .map((k) => ({ label: k.toUpperCase(), value: pct(mom[k]!.chg5, 1), bias: mom[k]!.bias })),
     });
-    if (eq.length) signals.push({ label: "Index technicals", bias: b, weight: 1.5, note: `${up}/${eq.length} above trend` });
+    if (breadth) {
+      signals.push({ label: "Instrument breadth", bias: breadth.bias, weight: 1.5, note: `${breadth.riskUp}/${breadth.total} risk-on across the board` });
+    } else if (eq.length) {
+      signals.push({ label: "Index technicals", bias: b, weight: 1.5, note: `${up}/${eq.length} above trend` });
+    }
   }
 
   // ── 5. Cross-asset confirmation ─────────────────────────────────────────
