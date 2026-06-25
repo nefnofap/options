@@ -1,13 +1,15 @@
 // Market Thesis synthesis engine. Composes the existing free, graceful-degrade
 // orchestrators (macro via FRED, sentiment via the lexicon over Yahoo news) plus
-// our own zero-key options chain (CBOE) and Yahoo price series into ONE coherent,
-// auditable market thesis. No paid API and no LLM — every paragraph is generated
-// by deterministic rules, so the same inputs always yield the same thesis.
+// our own zero-key options chains (CBOE) and the 16+ instrument board into ONE
+// coherent, auditable market thesis. The read is BROAD-MARKET: directional calls
+// come from a composite of the major equity indices (S&P 500, Nasdaq, Dow,
+// Russell), cross-asset flows, and index-options dealer positioning — not a
+// single ticker. No paid API and no LLM; the same inputs always yield the same
+// thesis.
 //
 // Like the other intel orchestrators, getThesis() NEVER throws: any failing
 // provider records a non-fatal notice and the thesis degrades around it.
 
-import { getChart } from "../data";
 import { getChain } from "../data";
 import { strikeAggregates, gammaFlip, maxPain } from "../analytics";
 import { absorptionProfile } from "../regime";
@@ -15,7 +17,6 @@ import { getMacro, getSentiment, getInstruments } from "./data";
 import { calendarToday } from "./tradingeconomics";
 import { assessGeopolitics } from "./geopolitics";
 import { biasOf } from "./sentiment";
-import type { ChartBar } from "../types";
 import type {
   Bias,
   CatalystItem,
@@ -28,68 +29,46 @@ import type {
   ThesisSignal,
 } from "./types";
 
-const now = () => new Date();
-const todayStr = () => now().toISOString().slice(0, 10);
+const todayStr = () => new Date().toISOString().slice(0, 10);
 const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const sign = (n: number): Bias => (n > 0.12 ? "bullish" : n < -0.12 ? "bearish" : "neutral");
 const biasVal = (b: Bias) => (b === "bullish" ? 1 : b === "bearish" ? -1 : 0);
 const pct = (n: number | null | undefined, dp = 2) =>
   n == null || !Number.isFinite(n) ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(dp)}%`;
 
-// ── Price momentum from a daily Yahoo series (zero-key) ──────────────────────
-interface Momentum {
-  last: number;
-  chg1: number; // 1-day % change
-  chg5: number; // 5-day % change
-  vsMa20: number; // % above/below the 20-day average
-  bias: Bias;
-  score: number; // -1..+1
-}
-
-function momentum(bars: ChartBar[]): Momentum | null {
-  const closes = bars.map((b) => b.c).filter((c) => Number.isFinite(c) && c > 0);
-  if (closes.length < 6) return null;
-  const last = closes[closes.length - 1];
-  const prev1 = closes[closes.length - 2];
-  const ago5 = closes[closes.length - 6];
-  const chg1 = (last / prev1 - 1) * 100;
-  const chg5 = (last / ago5 - 1) * 100;
-  const ma20 = avg(closes.slice(-20));
-  const vsMa20 = ma20 > 0 ? (last / ma20 - 1) * 100 : 0;
-
+// Continuous -1..+1 trend score for one instrument, from its 5-day move, its
+// position vs the 20-day average, and today's change.
+function instScore(it: InstrumentSignal): number {
   let s = 0;
-  if (chg5 > 0.5) s += 1;
-  else if (chg5 < -0.5) s -= 1;
-  if (vsMa20 > 0.25) s += 0.6;
-  else if (vsMa20 < -0.25) s -= 0.6;
-  if (chg1 > 0.4) s += 0.4;
-  else if (chg1 < -0.4) s -= 0.4;
-  const score = Math.max(-1, Math.min(1, s / 2));
-  return { last, chg1, chg5, vsMa20, bias: sign(score), score };
-}
-
-// Pull a 1-month daily series; null (not throw) on any failure.
-async function series(symbol: string): Promise<Momentum | null> {
-  try {
-    const r = await getChart(symbol, "1mo", "1d");
-    return momentum(r.bars);
-  } catch {
-    return null;
+  if (it.chg5 != null) {
+    if (it.chg5 > 0.5) s += 1;
+    else if (it.chg5 < -0.5) s -= 1;
   }
+  if (it.vsMa20 != null) {
+    if (it.vsMa20 > 0.25) s += 0.6;
+    else if (it.vsMa20 < -0.25) s -= 0.6;
+  }
+  if (it.changePct != null) {
+    if (it.changePct > 0.4) s += 0.4;
+    else if (it.changePct < -0.4) s -= 0.4;
+  }
+  return Math.max(-1, Math.min(1, s / 2));
 }
 
 // ── Instrument breadth → market-direction signal ─────────────────────────────
 // Each tracked instrument's OWN bias is mapped to a market-risk polarity: a
 // bullish equity/crypto is risk-on (+), a bullish VIX or dollar is risk-OFF (−),
-// and commodities (ambiguous for equity risk) sit out of the directional vote
-// while still being shown on the board.
+// and commodities/bonds (ambiguous for equity risk) sit out of the directional
+// vote while still being shown on the board.
 const RISK_POLARITY: Record<string, number> = {
   SPX: 1, NDX: 1, IXIC: 1, DJI: 1, RUT: 1,
   BTCUSD: 1, ETHUSD: 1,
+  HYG: 0.6, // high-yield credit risk-on
   EURUSD: 0.5, // inverse to the dollar → mildly risk-on
   USDJPY: 0.5, // yen weakness → carry / risk-on
   VIX: -1, // rising vol → risk-off
   DXY: -0.7, // strong dollar → tighter conditions / risk-off
+  TLT: -0.4, // bonds bid → flight to safety
 };
 
 function instrumentBreadth(instruments: InstrumentSignal[]) {
@@ -129,45 +108,73 @@ function windowSentiment(headlines: ScoredHeadline[], hours: number) {
   };
 }
 
+// ── Index-options dealer-gamma read (per index, zero-key CBOE) ────────────────
+interface GammaRead {
+  symbol: string;
+  spot: number;
+  longGamma: boolean;
+  aboveFlip: boolean | null;
+  flip: number | null;
+  callWall: number | null;
+  putWall: number | null;
+  pain: number | null;
+  bias: Bias;
+  score: number;
+}
+
+async function gammaRead(symbol: string): Promise<GammaRead | null> {
+  const chain = await getChain(symbol);
+  const aggs = strikeAggregates(chain);
+  const flip = gammaFlip(aggs);
+  const pain = maxPain(aggs);
+  const { callWall, putWall } = absorptionProfile(aggs, chain.spot);
+  const totalGamma = aggs.reduce((a, x) => a + (Number.isFinite(x.netGammaNotional) ? x.netGammaNotional : 0), 0);
+  const longGamma = totalGamma >= 0;
+  const aboveFlip = flip != null ? chain.spot > flip : null;
+  let bias: Bias = "neutral";
+  let score = 0;
+  if (longGamma && aboveFlip) {
+    bias = "bullish";
+    score = 0.4;
+  } else if (longGamma && aboveFlip === false) {
+    bias = "bearish";
+    score = -0.3;
+  }
+  return { symbol, spot: chain.spot, longGamma, aboveFlip, flip, callWall, putWall, pain, bias, score };
+}
+
 export async function getThesis(): Promise<ThesisResult> {
   const notices: ProviderNotice[] = [];
 
-  // Equity beta, cross-asset proxies — all zero-key Yahoo daily series.
-  const XASSET = {
-    spy: "SPY",
-    qqq: "QQQ",
-    dia: "DIA",
-    iwm: "IWM",
-    tlt: "TLT", // long bonds
-    hyg: "HYG", // high-yield credit (risk appetite)
-    gld: "GLD", // gold
-    uup: "UUP", // US dollar
-    uso: "USO", // crude oil
-    btc: "BTC-USD",
-  } as const;
-
-  const [sentiment, macro, calRes, chartRes, instRes] = await Promise.all([
+  const [sentiment, macro, calRes, instRes] = await Promise.all([
     getSentiment().catch(() => null),
     getMacro().catch(() => null),
     calendarToday().catch((e) => {
       notices.push({ provider: "TradingEconomics", message: (e as Error).message });
       return [];
     }),
-    Promise.all(Object.values(XASSET).map((s) => series(s))),
     getInstruments().catch(() => null),
   ]);
   if (sentiment) notices.push(...sentiment.notices);
   if (macro) notices.push(...macro.notices);
   if (instRes) notices.push(...instRes.notices);
 
-  // Polarity-aware breadth across the full 16-instrument board (zero-key).
-  const breadth = instRes ? instrumentBreadth(instRes.instruments) : null;
+  const board = instRes?.instruments ?? [];
+  const inst = (sym: string) => board.find((i) => i.symbol === sym && !i.error) ?? null;
 
-  const keys = Object.keys(XASSET) as (keyof typeof XASSET)[];
-  const mom: Record<string, Momentum | null> = {};
-  keys.forEach((k, i) => (mom[k] = chartRes[i]));
-  if (keys.every((k) => mom[k] == null)) {
-    notices.push({ provider: "Yahoo", message: "Price series unavailable — technical/cross-asset reads skipped." });
+  // Broad equity composite — the market read, not a single ticker.
+  const EQ = ["SPX", "NDX", "DJI", "RUT"];
+  const eqList = EQ.map(inst).filter((x): x is InstrumentSignal => !!x);
+  const eqScore = eqList.length ? avg(eqList.map(instScore)) : 0;
+  const eqBias = sign(eqScore);
+  const eqChg5 = eqList.length ? avg(eqList.map((i) => i.chg5 ?? 0)) : null;
+  const eqChg1 = eqList.length ? avg(eqList.map((i) => i.changePct ?? 0)) : null;
+  const eqUp = eqList.filter((i) => i.bias === "bullish").length;
+
+  // Polarity-aware breadth across the full instrument board.
+  const breadth = instRes ? instrumentBreadth(board) : null;
+  if (!board.length) {
+    notices.push({ provider: "Yahoo", message: "Instrument board unavailable — price-based reads degraded." });
   }
 
   const headlines = sentiment?.headlines ?? [];
@@ -177,9 +184,8 @@ export async function getThesis(): Promise<ThesisResult> {
   // ── 1. Weekly sentiment ────────────────────────────────────────────────
   const weekly = windowSentiment(headlines, 24 * 7);
   {
-    const spyWk = mom.spy?.chg5 ?? null;
     let s = weekly.score * 0.7;
-    if (spyWk != null) s += Math.max(-1, Math.min(1, spyWk / 3)) * 0.3;
+    if (eqChg5 != null) s += Math.max(-1, Math.min(1, eqChg5 / 3)) * 0.3;
     const b = sign(s);
     sections.push({
       key: "weekly",
@@ -187,22 +193,20 @@ export async function getThesis(): Promise<ThesisResult> {
       bias: b,
       score: s,
       headline: `News tone over the past week reads ${b.toUpperCase()}${
-        spyWk != null ? `, with the S&P ${spyWk >= 0 ? "up" : "down"} ${Math.abs(spyWk).toFixed(1)}% on the week` : ""
+        eqChg5 != null ? `, with the broad market ${eqChg5 >= 0 ? "up" : "down"} ${Math.abs(eqChg5).toFixed(1)}% on the week` : ""
       }.`,
       body: [
-        `Across ${weekly.bullish + weekly.bearish || headlines.length} scored stories the bullish/bearish split is ${weekly.bullish}↑ / ${weekly.bearish}↓ (net score ${weekly.score.toFixed(2)}).`,
+        `Across the scored stories the bullish/bearish split is ${weekly.bullish}↑ / ${weekly.bearish}↓ (net tone ${weekly.score.toFixed(2)}).`,
         macro
-          ? `The weekly read is framed by a ${macro.regime.toUpperCase()} macro regime — ${macro.drivers[0] ?? "mixed signals"}.`
-          : `Macro context is unavailable this run (set FRED_API_KEY to enrich the weekly frame).`,
-        spyWk != null
-          ? `Price confirms/conflicts: SPY is ${pct(spyWk, 1)} over five sessions and ${
-              (mom.spy?.vsMa20 ?? 0) >= 0 ? "above" : "below"
-            } its 20-day average.`
-          : `Weekly price trend unavailable.`,
+          ? `Framed by a ${macro.regime.toUpperCase()} macro regime — ${macro.drivers[0] ?? "mixed signals"}.`
+          : `Macro context unavailable this run.`,
+        eqChg5 != null
+          ? `Index composite is ${pct(eqChg5, 1)} over five sessions (S&P, Nasdaq, Dow, Russell average).`
+          : `Weekly index trend unavailable.`,
       ],
       metrics: [
         { label: "Net tone", value: weekly.score.toFixed(2), bias: b },
-        { label: "SPY 5d", value: pct(spyWk, 1), bias: spyWk == null ? "neutral" : sign(spyWk / 3) },
+        { label: "Index 5d", value: pct(eqChg5, 1), bias: eqChg5 == null ? "neutral" : sign(eqChg5 / 3) },
       ],
     });
     signals.push({ label: "Weekly sentiment", bias: b, weight: 1.5, note: `net tone ${weekly.score.toFixed(2)}` });
@@ -210,33 +214,32 @@ export async function getThesis(): Promise<ThesisResult> {
 
   // ── 2. Daily sentiment ─────────────────────────────────────────────────
   const daily = windowSentiment(headlines, 24);
+  const vix = macro?.series.find((x) => x.id === "VIXCLS") ?? null;
+  const vixInst = inst("VIX");
+  const vixLevel = vix?.value ?? vixInst?.price ?? null;
   {
-    const spy1 = mom.spy?.chg1 ?? null;
     let s = daily.score * 0.7;
-    if (spy1 != null) s += Math.max(-1, Math.min(1, spy1 / 1.5)) * 0.3;
+    if (eqChg1 != null) s += Math.max(-1, Math.min(1, eqChg1 / 1.5)) * 0.3;
     const b = sign(s);
-    const vix = macro?.series.find((x) => x.id === "VIXCLS");
     sections.push({
       key: "daily",
       title: "Daily Market Sentiment",
       bias: b,
       score: s,
-      headline: `Today's tape and headlines lean ${b.toUpperCase()}${
-        vix ? ` with VIX at ${vix.value.toFixed(1)}` : ""
-      }.`,
+      headline: `Today's tape and headlines lean ${b.toUpperCase()}${vixLevel != null ? ` with VIX at ${vixLevel.toFixed(1)}` : ""}.`,
       body: [
         `${daily.n} stories landed in the last 24h (${daily.bullish}↑ / ${daily.bearish}↓).`,
-        spy1 != null ? `SPY is ${pct(spy1, 2)} on the day.` : `Intraday price move unavailable.`,
-        vix
-          ? `Volatility regime: VIX ${vix.value.toFixed(1)} — ${
-              vix.value > 22 ? "elevated, expect wider ranges" : vix.value < 15 ? "compressed, mean-reversion favoured" : "mid-range"
+        eqChg1 != null ? `The major indices are ${pct(eqChg1, 2)} on the day (composite).` : `Intraday index move unavailable.`,
+        vixLevel != null
+          ? `Volatility regime: VIX ${vixLevel.toFixed(1)} — ${
+              vixLevel > 22 ? "elevated, expect wider ranges" : vixLevel < 15 ? "compressed, mean-reversion favoured" : "mid-range"
             }.`
-          : `VIX unavailable (set FRED_API_KEY).`,
+          : `VIX unavailable.`,
       ],
       metrics: [
         { label: "24h tone", value: daily.score.toFixed(2), bias: b },
-        { label: "SPY 1d", value: pct(spy1, 2), bias: spy1 == null ? "neutral" : sign(spy1 / 1.5) },
-        ...(vix ? [{ label: "VIX", value: vix.value.toFixed(1), bias: (vix.value > 22 ? "bearish" : vix.value < 15 ? "bullish" : "neutral") as Bias }] : []),
+        { label: "Index 1d", value: pct(eqChg1, 2), bias: eqChg1 == null ? "neutral" : sign(eqChg1 / 1.5) },
+        ...(vixLevel != null ? [{ label: "VIX", value: vixLevel.toFixed(1), bias: (vixLevel > 22 ? "bearish" : vixLevel < 15 ? "bullish" : "neutral") as Bias }] : []),
       ],
     });
     signals.push({ label: "Daily sentiment", bias: b, weight: 1.0, note: `${daily.n} stories, score ${daily.score.toFixed(2)}` });
@@ -274,23 +277,17 @@ export async function getThesis(): Promise<ThesisResult> {
     if (macro) signals.push({ label: "Macro regime", bias: b, weight: 2.0, note: macro.regime });
   }
 
-  // ── 4. Micro / market structure (technicals + breadth) ──────────────────
+  // ── 4. Micro / market structure (instrument breadth) ────────────────────
   {
-    const eq = (["spy", "qqq", "dia", "iwm"] as const).map((k) => mom[k]).filter(Boolean) as Momentum[];
-    const up = eq.filter((m) => m.bias === "bullish").length;
-    const idxBreadth = eq.length ? up / eq.length : null;
-    const small = mom.iwm;
-    const big = mom.spy;
+    const rut = inst("RUT");
+    const spx = inst("SPX");
     const leadership =
-      small && big
-        ? small.chg5 > big.chg5
+      rut && spx && rut.chg5 != null && spx.chg5 != null
+        ? rut.chg5 > spx.chg5
           ? "small-caps leading (broadening, risk-on)"
           : "mega-caps leading (narrow, defensive)"
         : "leadership unclear";
-
-    // The directional read is driven by the broad 16-instrument board when it
-    // loaded; otherwise we fall back to the 4-index momentum proxy.
-    const s = breadth ? breadth.score : eq.length ? avg(eq.map((m) => m.score)) : 0;
+    const s = breadth ? breadth.score : eqScore;
     const b = sign(s);
     sections.push({
       key: "micro",
@@ -299,45 +296,48 @@ export async function getThesis(): Promise<ThesisResult> {
       score: s,
       headline: breadth
         ? `Instrument board reads ${b.toUpperCase()} — ${breadth.riskUp}/${breadth.total} risk proxies risk-on aligned.`
-        : idxBreadth == null
-        ? `Index technicals unavailable this run.`
-        : `Index trend ${b.toUpperCase()} with ${up}/${eq.length} benchmarks above trend — ${leadership}.`,
+        : eqList.length
+        ? `Index trend ${b.toUpperCase()} with ${eqUp}/${eqList.length} benchmarks bullish — ${leadership}.`
+        : `Market-structure data unavailable this run.`,
       body: [
-        breadth ? `Across the 16-instrument board, ${breadth.riskUp}/${breadth.total} risk assets (equities, crypto, FX vs the dollar; VIX/USD counted inversely) are aligned risk-on.` : ``,
-        big ? `SPY ${pct(big.chg5, 1)} (5d), ${big.vsMa20 >= 0 ? "above" : "below"} its 20-day MA by ${pct(big.vsMa20, 1)} — ${leadership}.` : `SPY series unavailable.`,
-        mom.qqq ? `QQQ ${pct(mom.qqq.chg5, 1)} (5d) — growth/tech ${mom.qqq.bias}.` : ``,
+        breadth ? `Across the board, ${breadth.riskUp}/${breadth.total} risk assets (equities, crypto, credit, FX vs the dollar; VIX/USD/bonds counted inversely) are aligned risk-on.` : ``,
+        eqList.length ? `Index breadth: ${eqUp}/${eqList.length} of the majors are bullish on their own technicals — ${leadership}.` : ``,
+        spx && spx.vsMa20 != null ? `S&P is ${spx.vsMa20 >= 0 ? "above" : "below"} its 20-day average by ${pct(spx.vsMa20, 1)}.` : ``,
       ].filter(Boolean),
-      metrics: (["spy", "qqq", "dia", "iwm"] as const)
-        .filter((k) => mom[k])
-        .map((k) => ({ label: k.toUpperCase(), value: pct(mom[k]!.chg5, 1), bias: mom[k]!.bias })),
+      metrics: eqList.map((i) => ({ label: i.symbol, value: pct(i.chg5, 1), bias: i.bias })),
     });
     if (breadth) {
       signals.push({ label: "Instrument breadth", bias: breadth.bias, weight: 1.5, note: `${breadth.riskUp}/${breadth.total} risk-on across the board` });
-    } else if (eq.length) {
-      signals.push({ label: "Index technicals", bias: b, weight: 1.5, note: `${up}/${eq.length} above trend` });
+    } else if (eqList.length) {
+      signals.push({ label: "Index technicals", bias: b, weight: 1.5, note: `${eqUp}/${eqList.length} benchmarks bullish` });
     }
   }
 
   // ── 5. Cross-asset confirmation ─────────────────────────────────────────
   {
-    const equity = mom.spy?.score ?? 0;
-    const bondsUp = (mom.tlt?.chg5 ?? 0) > 0.5; // flight to safety
-    const hygUp = (mom.hyg?.chg5 ?? 0) > 0; // credit appetite healthy
-    const goldUp = (mom.gld?.chg5 ?? 0) > 1; // hedging bid
-    const dollarUp = (mom.uup?.chg5 ?? 0) > 0.5; // risk-off / tightening
+    const bonds = inst("TLT");
+    const credit = inst("HYG");
+    const gold = inst("XAUUSD");
+    const dollar = inst("DXY");
+    const crypto = inst("BTCUSD");
+    const oil = inst("CL");
+    const bondsUp = (bonds?.chg5 ?? 0) > 0.5;
+    const creditUp = (credit?.chg5 ?? 0) > 0;
+    const goldUp = (gold?.chg5 ?? 0) > 1;
+    const dollarUp = (dollar?.chg5 ?? 0) > 0.5;
+
     const divergences: string[] = [];
     let confirm = 0;
-    if (mom.spy && mom.hyg) {
-      if (sign(equity) === "bullish" && hygUp) confirm += 1;
-      else if (sign(equity) === "bullish" && !hygUp) divergences.push("equities up but high-yield credit soft — risk rally unconfirmed");
+    if (eqBias === "bullish" && credit) {
+      if (creditUp) confirm += 1;
+      else divergences.push("equities up but high-yield credit soft — risk rally unconfirmed");
     }
-    if (mom.spy && mom.tlt) {
-      if (sign(equity) === "bullish" && bondsUp) divergences.push("bonds bid alongside stocks — a defensive undertone");
-      if (sign(equity) === "bearish" && bondsUp) confirm -= 1; // classic risk-off confirmed
-    }
-    if (sign(equity) === "bullish" && goldUp) divergences.push("gold rallying with equities — hedging demand persists");
-    if (sign(equity) === "bullish" && dollarUp) divergences.push("dollar firm into an equity rally — tighter conditions");
-    const s = Math.max(-1, Math.min(1, equity + confirm * 0.3 - divergences.length * 0.15));
+    if (eqBias === "bullish" && bondsUp) divergences.push("bonds bid alongside stocks — a defensive undertone");
+    if (eqBias === "bearish" && bondsUp) confirm -= 1; // classic risk-off confirmed
+    if (eqBias === "bullish" && goldUp) divergences.push("gold rallying with equities — hedging demand persists");
+    if (eqBias === "bullish" && dollarUp) divergences.push("dollar firm into an equity rally — tighter conditions");
+
+    const s = Math.max(-1, Math.min(1, eqScore + confirm * 0.3 - divergences.length * 0.15));
     const b = sign(s);
     sections.push({
       key: "crossasset",
@@ -349,18 +349,19 @@ export async function getThesis(): Promise<ThesisResult> {
         : `Cross-asset flows ${b === "neutral" ? "are mixed" : `confirm a ${b.toUpperCase()} tilt`}.`,
       body: [
         divergences.length ? `Watch: ${divergences.join("; ")}.` : `Bonds, credit, gold and the dollar broadly agree with the equity read.`,
-        `Crypto risk proxy: BTC ${mom.btc ? pct(mom.btc.chg5, 1) + " (5d)" : "unavailable"}.`,
+        `Crypto risk proxy: BTC ${crypto ? pct(crypto.chg5, 1) + " (5d)" : "unavailable"}; oil ${oil ? pct(oil.chg5, 1) + " (5d)" : "unavailable"}.`,
       ],
-      metrics: (["tlt", "hyg", "gld", "uup", "uso", "btc"] as const)
-        .filter((k) => mom[k])
-        .map((k) => ({ label: k === "btc" ? "BTC" : k.toUpperCase(), value: pct(mom[k]!.chg5, 1), bias: mom[k]!.bias })),
+      metrics: (["TLT", "HYG", "XAUUSD", "DXY", "CL", "BTCUSD"] as const)
+        .map((sym) => inst(sym))
+        .filter((x): x is InstrumentSignal => !!x)
+        .map((i) => ({ label: i.symbol, value: pct(i.chg5, 1), bias: i.bias })),
     });
-    if (mom.spy) signals.push({ label: "Cross-asset", bias: b, weight: 1.5, note: divergences.length ? `${divergences.length} divergence(s)` : "aligned" });
+    if (eqList.length) signals.push({ label: "Cross-asset", bias: b, weight: 1.5, note: divergences.length ? `${divergences.length} divergence(s)` : "aligned" });
   }
 
-  // ── 6. Options positioning (our own GEX, zero-key CBOE) ─────────────────
+  // ── 6. Options positioning — index dealer gamma (SPY + QQQ) ──────────────
   const levels: ThesisLevels = {
-    symbol: "SPY",
+    symbol: "S&P 500 (SPY)",
     spot: null,
     gammaFlip: null,
     callWall: null,
@@ -372,89 +373,68 @@ export async function getThesis(): Promise<ThesisResult> {
     dealerRegime: null,
   };
   {
-    let optBias: Bias = "neutral";
-    let optScore = 0;
-    try {
-      const chain = await getChain("SPY");
-      const aggs = strikeAggregates(chain);
-      const flip = gammaFlip(aggs);
-      const pain = maxPain(aggs);
-      const { callWall, putWall } = absorptionProfile(aggs, chain.spot);
-      const totalGamma = aggs.reduce((a, x) => a + (Number.isFinite(x.netGammaNotional) ? x.netGammaNotional : 0), 0);
-      const longGamma = totalGamma >= 0;
+    const reads = await Promise.all(
+      ["SPY", "QQQ"].map((s) =>
+        gammaRead(s).catch((e) => {
+          notices.push({ provider: "CBOE", message: `${s} options skipped — ${(e as Error).message}` });
+          return null;
+        }),
+      ),
+    );
+    const ok = reads.filter((r): r is GammaRead => !!r);
+    const primary = ok.find((r) => r.symbol === "SPY") ?? ok[0] ?? null;
 
-      levels.spot = chain.spot;
-      levels.gammaFlip = flip;
-      levels.callWall = callWall;
-      levels.putWall = putWall;
-      levels.maxPain = pain;
-      levels.resistance = callWall;
-      levels.support = putWall;
-      levels.dealerRegime = longGamma ? "long" : "short";
-
-      const aboveFlip = flip != null ? chain.spot > flip : null;
-      // Long gamma + above flip = dealers dampen, supportive drift (mild bullish).
-      // Short gamma = dealers amplify; tilt follows daily momentum, conviction-reducing.
-      if (longGamma && aboveFlip) {
-        optBias = "bullish";
-        optScore = 0.4;
-      } else if (longGamma && aboveFlip === false) {
-        optBias = "bearish";
-        optScore = -0.3;
-      } else if (!longGamma) {
-        optBias = sign(mom.spy?.score ?? 0);
-        optScore = (mom.spy?.score ?? 0) * 0.5;
-      }
-      levels.invalidation = flip;
-
-      sections.push({
-        key: "options",
-        title: "Options Positioning — Dealer Gamma (SPY)",
-        bias: optBias,
-        score: optScore,
-        headline: `Dealers are ${longGamma ? "LONG" : "SHORT"} gamma${
-          flip != null ? `, spot ${aboveFlip ? "above" : "below"} the ${flip.toFixed(0)} flip` : ""
-        }.`,
-        body: [
-          longGamma
-            ? `Long-gamma regime: dealer hedging is mean-reverting — expect ranges to hold and dips/rips to fade unless a wall breaks.`
-            : `Short-gamma regime: dealer hedging amplifies moves — breakouts run and pullbacks accelerate. Size accordingly.`,
-          `Call wall ${callWall?.toFixed(0) ?? "—"} caps upside; put wall ${putWall?.toFixed(0) ?? "—"} cushions downside; max-pain magnet ${pain?.toFixed(0) ?? "—"}.`,
-          flip != null ? `Gamma flip at ${flip.toFixed(0)} is the regime line — losing it ${aboveFlip ? "would open volatility expansion" : "must be reclaimed to stabilise"}.` : `Gamma flip unavailable.`,
-        ],
-        metrics: [
-          { label: "Regime", value: longGamma ? "Long γ" : "Short γ", bias: longGamma ? "bullish" : "bearish" },
-          { label: "Flip", value: flip?.toFixed(0) ?? "—" },
-          { label: "Call wall", value: callWall?.toFixed(0) ?? "—" },
-          { label: "Put wall", value: putWall?.toFixed(0) ?? "—" },
-        ],
-      });
-      signals.push({ label: "Options positioning", bias: optBias, weight: 1.0, note: `${longGamma ? "long" : "short"} gamma` });
-    } catch (e) {
-      notices.push({ provider: "CBOE", message: `Options positioning skipped — ${(e as Error).message}` });
-      sections.push({
-        key: "options",
-        title: "Options Positioning — Dealer Gamma (SPY)",
-        bias: "neutral",
-        score: 0,
-        headline: `Options chain unavailable this run.`,
-        body: [`CBOE did not return a SPY chain — dealer-gamma read is skipped.`],
-      });
+    if (primary) {
+      levels.symbol = primary.symbol === "SPY" ? "S&P 500 (SPY)" : primary.symbol;
+      levels.spot = primary.spot;
+      levels.gammaFlip = primary.flip;
+      levels.callWall = primary.callWall;
+      levels.putWall = primary.putWall;
+      levels.maxPain = primary.pain;
+      levels.resistance = primary.callWall;
+      levels.support = primary.putWall;
+      levels.invalidation = primary.flip;
+      levels.dealerRegime = primary.longGamma ? "long" : "short";
     }
+
+    const optScore = ok.length ? avg(ok.map((r) => r.score)) : 0;
+    const optBias = sign(optScore);
+    const longCount = ok.filter((r) => r.longGamma).length;
+
+    sections.push({
+      key: "options",
+      title: "Options Positioning — Index Dealer Gamma",
+      bias: optBias,
+      score: optScore,
+      headline: ok.length
+        ? `Dealers are ${longCount === ok.length ? "LONG" : longCount === 0 ? "SHORT" : "MIXED"} gamma across ${ok.map((r) => r.symbol).join(" & ")}.`
+        : `Index option chains unavailable this run.`,
+      body: ok.length
+        ? [
+            primary && primary.longGamma
+              ? `Long-gamma regime: dealer hedging is mean-reverting — expect ranges to hold and dips/rips to fade unless a wall breaks.`
+              : `Short-gamma regime: dealer hedging amplifies moves — breakouts run and pullbacks accelerate.`,
+            ...ok.map(
+              (r) =>
+                `${r.symbol}: ${r.longGamma ? "long" : "short"} γ, spot ${r.aboveFlip == null ? "—" : r.aboveFlip ? "above" : "below"} the ${r.flip?.toFixed(0) ?? "—"} flip; walls ${r.putWall?.toFixed(0) ?? "—"}/${r.callWall?.toFixed(0) ?? "—"}.`,
+            ),
+          ]
+        : [`CBOE did not return index chains — dealer-gamma read is skipped.`],
+      metrics: ok.map((r) => ({ label: `${r.symbol} flip`, value: r.flip?.toFixed(0) ?? "—", bias: r.longGamma ? "bullish" : "bearish" })),
+    });
+    if (ok.length) signals.push({ label: "Options positioning", bias: optBias, weight: 1.0, note: `${longCount}/${ok.length} indices long γ` });
   }
 
   // ── 7. Geopolitics ──────────────────────────────────────────────────────
   const geo = assessGeopolitics(headlines);
   {
-    const b: Bias = geo.level === "high" ? "bearish" : geo.level === "elevated" ? "neutral" : "neutral";
+    const b: Bias = geo.level === "high" ? "bearish" : "neutral";
     sections.push({
       key: "geopolitics",
       title: "Geopolitical Risk",
       bias: b,
-      score: -geo.score, // risk is a downside tilt
-      headline: `Geopolitical risk reads ${geo.level.toUpperCase()}${
-        geo.themes.length ? ` — ${geo.themes[0].label.toLowerCase()} dominant` : ""
-      }.`,
+      score: -geo.score,
+      headline: `Geopolitical risk reads ${geo.level.toUpperCase()}${geo.themes.length ? ` — ${geo.themes[0].label.toLowerCase()} dominant` : ""}.`,
       body: [
         geo.themes.length ? `Active themes: ${geo.themes.map((t) => `${t.label} (${t.count})`).join(", ")}.` : `No material geopolitical headlines detected in the current news pool.`,
         geo.level === "high"
@@ -473,16 +453,12 @@ export async function getThesis(): Promise<ThesisResult> {
   const score = signals.reduce((a, s) => a + biasVal(s.bias) * s.weight, 0) / totalW;
   const bias = sign(score);
 
-  // Conviction: magnitude of the net call + how aligned the weighted votes are,
-  // docked for missing data and acute geopolitical uncertainty.
   const directional = signals.filter((s) => s.bias !== "neutral");
-  const aligned = directional
-    .filter((s) => biasVal(s.bias) === Math.sign(score))
-    .reduce((a, s) => a + s.weight, 0);
+  const aligned = directional.filter((s) => biasVal(s.bias) === Math.sign(score)).reduce((a, s) => a + s.weight, 0);
   const dirW = directional.reduce((a, s) => a + s.weight, 0) || 1;
-  const agreement = aligned / dirW; // 0..1
+  const agreement = aligned / dirW;
   let conviction = Math.abs(score) * 55 + agreement * 45;
-  const dataGaps = notices.filter((n) => /not set|unavailable|skipped|no data/i.test(n.message)).length;
+  const dataGaps = notices.filter((n) => /not set|unavailable|skipped|no data|degraded/i.test(n.message)).length;
   conviction -= dataGaps * 4;
   if (geo.level === "high") conviction -= 12;
   else if (geo.level === "elevated") conviction -= 5;
@@ -496,17 +472,16 @@ export async function getThesis(): Promise<ThesisResult> {
   const counter = bias === "bullish" ? topBear : topBull;
 
   const thesis =
-    `Net read: ${bias.toUpperCase()} with ${convictionLabel} conviction (${conviction}/100). ` +
+    `Net read on the broad market: ${bias.toUpperCase()} with ${convictionLabel} conviction (${conviction}/100). ` +
     (driver ? `The call is led by ${driver.label.toLowerCase()} (${driver.note}). ` : ``) +
     (counter ? `The main risk to it is ${counter.label.toLowerCase()} pulling the other way. ` : ``) +
-    (levels.gammaFlip != null
-      ? `Options structure puts the line in the sand at the ${levels.gammaFlip.toFixed(0)} gamma flip on SPY.`
-      : ``);
+    (levels.gammaFlip != null ? `Index options put the line in the sand at the ${levels.gammaFlip.toFixed(0)} gamma flip on ${levels.symbol}.` : ``);
 
   const tldr: string[] = [
     `Bottom line: ${bias.toUpperCase()} · conviction ${conviction}/100 (${convictionLabel}).`,
     `Weekly tone ${weekly.bias}, daily tone ${daily.bias}.`,
     macro ? `Macro regime ${macro.regime.toUpperCase()}.` : `Macro data offline.`,
+    breadth ? `Breadth ${breadth.riskUp}/${breadth.total} risk-on; index composite ${eqBias}.` : `Instrument board offline.`,
     levels.dealerRegime ? `Dealers ${levels.dealerRegime} gamma; key levels ${levels.support?.toFixed(0) ?? "—"} / ${levels.resistance?.toFixed(0) ?? "—"}.` : `Options positioning offline.`,
     `Geopolitical risk ${geo.level}.`,
   ];

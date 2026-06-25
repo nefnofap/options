@@ -55,6 +55,8 @@ export function scoreText(text: string): LexScore {
   return { score, bias, hits };
 }
 
+// Aggregate sentiment scores are small (per-headline scores are squashed and
+// then averaged), so the aggregate band is tighter than the per-headline one.
 export function biasOf(score: number): Bias {
-  return score > 0.12 ? "bullish" : score < -0.12 ? "bearish" : "neutral";
+  return score > 0.05 ? "bullish" : score < -0.05 ? "bearish" : "neutral";
 }

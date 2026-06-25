@@ -84,46 +84,82 @@ export async function getMacro(): Promise<MacroResult> {
     if (!series.find((x) => x.label.toLowerCase() === s.label.toLowerCase())) series.push(s);
   }
 
-  // Regime classification from credit spread, VIX, and the 2s10s curve.
+  // Regime classification — graduated so a calm-but-tilted market still reads
+  // directionally instead of collapsing to neutral. Each input contributes a
+  // weighted vote; we normalise and use a narrow neutral band.
   const find = (id: string) => series.find((s) => s.id === id);
   let regimeScore = 0;
   const drivers: string[] = [];
 
+  // Credit spreads: both the move and the absolute stress level matter.
   const hy = find("BAMLH0A0HYM2");
   if (hy?.change != null) {
-    if (hy.change > 0.1) {
-      regimeScore -= 1;
-      drivers.push("Credit spreads widening (risk-off)");
-    } else if (hy.change < -0.1) {
-      regimeScore += 1;
-      drivers.push("Credit spreads tightening (risk-on)");
-    }
+    regimeScore += Math.max(-1.5, Math.min(1.5, -hy.change / 0.1)); // +0.1% wider ≈ -1
+    if (hy.change > 0.05) drivers.push("Credit spreads widening (risk-off)");
+    else if (hy.change < -0.05) drivers.push("Credit spreads tightening (risk-on)");
   }
+  if (hy && hy.value > 5) {
+    regimeScore -= 0.5;
+    drivers.push(`HY spread elevated at ${hy.value.toFixed(2)}% (stress)`);
+  }
+
+  // VIX: graduated bands rather than a single 22/15 cliff.
   const vix = find("VIXCLS");
   if (vix) {
-    if (vix.value > 22) {
-      regimeScore -= 1;
-      drivers.push(`VIX elevated at ${vix.value.toFixed(1)} (risk-off)`);
-    } else if (vix.value < 15) {
-      regimeScore += 1;
-      drivers.push(`VIX calm at ${vix.value.toFixed(1)} (risk-on)`);
-    }
+    const v = vix.value;
+    if (v >= 28) regimeScore -= 2;
+    else if (v >= 22) regimeScore -= 1;
+    else if (v >= 20) regimeScore -= 0.5;
+    else if (v < 13) regimeScore += 1.5;
+    else if (v < 16) regimeScore += 1;
+    else if (v < 18) regimeScore += 0.5;
+    drivers.push(
+      `VIX ${v.toFixed(1)} — ${v >= 22 ? "elevated (risk-off)" : v < 16 ? "calm (risk-on)" : "mid-range"}`,
+    );
   }
+
+  // Yield curve: inversion is a late-cycle caution tilt.
   const t2 = find("DGS2");
   const t10 = find("DGS10");
   if (t2 && t10) {
     const curve = t10.value - t2.value;
-    if (curve < 0) drivers.push(`2s10s inverted (${curve.toFixed(2)}%) — late-cycle caution`);
-    else drivers.push(`2s10s positive (${curve.toFixed(2)}%)`);
+    if (curve < 0) {
+      regimeScore -= 0.5;
+      drivers.push(`2s10s inverted (${curve.toFixed(2)}%) — late-cycle caution`);
+    } else {
+      drivers.push(`2s10s positive (${curve.toFixed(2)}%)`);
+    }
   }
 
-  const regime: Regime = regimeScore > 0 ? "risk-on" : regimeScore < 0 ? "risk-off" : "neutral";
+  // Rate momentum: a fast back-up in 10Y yields tightens conditions.
+  if (t10?.change != null) {
+    if (t10.change > 0.1) {
+      regimeScore -= 0.4;
+      drivers.push("10Y yields backing up (tightening)");
+    } else if (t10.change < -0.1) {
+      regimeScore += 0.4;
+      drivers.push("10Y yields easing (supportive)");
+    }
+  }
+
+  // Labour market: rising unemployment leans risk-off.
+  const unrate = find("UNRATE");
+  if (unrate?.change != null) {
+    if (unrate.change > 0.1) {
+      regimeScore -= 0.4;
+      drivers.push("Unemployment ticking up");
+    } else if (unrate.change < -0.1) {
+      regimeScore += 0.3;
+    }
+  }
+
+  const regime: Regime = regimeScore > 0.4 ? "risk-on" : regimeScore < -0.4 ? "risk-off" : "neutral";
   if (drivers.length === 0) drivers.push("Insufficient data for a confident regime call");
 
   return {
     asOf: today(),
     regime,
-    regimeScore: Math.max(-1, Math.min(1, regimeScore / 2)),
+    regimeScore: Math.max(-1, Math.min(1, regimeScore / 3)),
     drivers,
     series,
     notices,
@@ -209,6 +245,10 @@ function aggregateSentiment(
   const bullishCount = scored.filter((h) => h.bias === "bullish").length;
   const bearishCount = scored.filter((h) => h.bias === "bearish").length;
   const neutralCount = scored.filter((h) => h.bias === "neutral").length;
+  // Blend the averaged score with the bull/bear count skew so a clearly tilted
+  // headline mix isn't washed out to neutral by the squashed average.
+  const skew = (bullishCount - bearishCount) / n;
+  const blended = avg * 0.6 + skew * 0.4;
 
   // Top driver words from the lexicon pass.
   const wordCounts = new Map<string, number>();
@@ -226,8 +266,8 @@ function aggregateSentiment(
 
   return {
     asOf: new Date().toISOString(),
-    score: avg,
-    bias: biasOf(avg),
+    score: blended,
+    bias: biasOf(blended),
     bullishCount,
     bearishCount,
     neutralCount,
@@ -300,6 +340,8 @@ const INSTRUMENTS: { symbol: string; name: string; yahoo: string; inverseRisk?: 
   { symbol: "DXY", name: "US Dollar Index", yahoo: "DX-Y.NYB" },
   { symbol: "EURUSD", name: "Euro / Dollar", yahoo: "EURUSD=X" },
   { symbol: "USDJPY", name: "Dollar / Yen", yahoo: "JPY=X" },
+  { symbol: "TLT", name: "20Y+ Treasuries", yahoo: "TLT" },
+  { symbol: "HYG", name: "High-Yield Credit", yahoo: "HYG" },
 ];
 
 // Trend-aware bias: blends RSI, MACD histogram and price vs its 20-day average.
@@ -352,7 +394,9 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 export async function getInstruments(): Promise<InstrumentsResult> {
   const notices: ProviderNotice[] = [];
 
-  const out = await mapLimit(INSTRUMENTS, 5, async (inst): Promise<InstrumentSignal> => {
+  // Concurrency kept low: Yahoo 429s serverless IPs on bursts. The 30-min Data
+  // Cache (getChart) means most of these resolve without touching Yahoo at all.
+  const out = await mapLimit(INSTRUMENTS, 3, async (inst): Promise<InstrumentSignal> => {
     try {
       // 6mo of daily bars gives MACD(26,9) and RSI(14) plenty of history.
       const chart = await getChart(inst.yahoo, "6mo", "1d");
@@ -366,6 +410,8 @@ export async function getInstruments(): Promise<InstrumentsResult> {
       const vsMa20 = ma20 != null && price != null ? (price / ma20 - 1) * 100 : null;
       const changePct =
         chart.prevClose > 0 && price != null ? ((price - chart.prevClose) / chart.prevClose) * 100 : null;
+      const ago5 = closes.length >= 6 ? closes[closes.length - 6] : null;
+      const chg5 = ago5 != null && price != null ? (price / ago5 - 1) * 100 : null;
 
       const { bias, level } = instBias(rsiVal, macdHist, vsMa20);
 
@@ -374,6 +420,8 @@ export async function getInstruments(): Promise<InstrumentsResult> {
         name: inst.name,
         price,
         changePct,
+        chg5,
+        vsMa20,
         rsi: rsiVal,
         macd: macdVal?.macd ?? null,
         macdSignal: macdVal?.signal ?? null,
@@ -388,6 +436,8 @@ export async function getInstruments(): Promise<InstrumentsResult> {
         name: inst.name,
         price: null,
         changePct: null,
+        chg5: null,
+        vsMa20: null,
         rsi: null,
         macd: null,
         macdSignal: null,

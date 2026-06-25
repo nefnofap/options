@@ -48,18 +48,21 @@ export interface ChartResult {
   stale?: boolean;
 }
 
-const CHART_TTL = 60_000;
-
 export async function getChart(
   symbol: string,
   range: "1d" | "5d" | "1mo" | "3mo" | "6mo" | "1y" | "5y" = "3mo",
   interval: "1m" | "5m" | "15m" | "1h" | "1d" | "1wk" = "1d",
 ): Promise<ChartResult> {
+  // Daily/weekly bars only change at the close, so cache them hard (both in
+  // process and in Vercel's Data Cache) — this is the main 429 defense.
+  const isCoarse = interval === "1d" || interval === "1wk";
+  const ttl = isCoarse ? 30 * 60_000 : 60_000;
+  const revalidate = isCoarse ? 1800 : 60;
   const key = `chart:${symbol.toUpperCase()}:${range}:${interval}`;
-  const fresh = cacheGet<ChartResult>(key, CHART_TTL);
+  const fresh = cacheGet<ChartResult>(key, ttl);
   if (fresh) return { ...fresh, stale: false };
   try {
-    const data = await getYahooChart(symbol, range, interval);
+    const data = await getYahooChart(symbol, range, interval, revalidate);
     cacheSet(key, data);
     return { ...data, stale: false };
   } catch (e) {

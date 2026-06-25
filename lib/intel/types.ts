@@ -81,7 +81,9 @@ export interface InstrumentSignal {
   symbol: string; // display symbol, e.g. "EUR/USD"
   name: string;
   price: number | null;
-  changePct: number | null;
+  changePct: number | null; // 1-day % change
+  chg5: number | null; // 5-day % change
+  vsMa20: number | null; // % above/below the 20-day average
   rsi: number | null;
   macd: number | null;
   macdSignal: number | null;
