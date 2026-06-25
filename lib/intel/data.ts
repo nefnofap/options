@@ -3,14 +3,12 @@
 // non-fatal ProviderNotice and degrades instead of throwing. The options app's
 // existing getNews() (Yahoo) is the zero-key fallback for news.
 
-import { getNews } from "../data";
+import { getNews, getChart } from "../data";
 import type { NewsItem } from "../types";
 import { fredLatest } from "./fred";
 import { finnhubMarketNews } from "./finnhub";
 import { marketauxNews } from "./marketaux";
 import { calendarToday } from "./tradingeconomics";
-import { twelveDataSeries } from "./twelvedata";
-import { taapiRsi, taapiMacd } from "./taapi";
 import { econpulseMacro } from "./econpulse";
 import { apifySentiment } from "./apify";
 import { rsi as calcRsi, macd as calcMacd } from "./indicators";
@@ -281,93 +279,111 @@ export async function getBrief(): Promise<BriefResult> {
   };
 }
 
-// ── Instruments tracker ──────────────────────────────────────────────────────
-const INSTRUMENTS: { symbol: string; name: string; taapiSymbol?: string; taapiExchange?: string }[] = [
-  { symbol: "SPY", name: "S&P 500 (SPY)" },
-  { symbol: "QQQ", name: "Nasdaq 100 (QQQ)" },
-  { symbol: "DIA", name: "Dow 30 (DIA)" },
-  { symbol: "EUR/USD", name: "Euro / Dollar" },
-  { symbol: "USD/JPY", name: "Dollar / Yen" },
-  { symbol: "GBP/USD", name: "Pound / Dollar" },
-  { symbol: "BTC/USD", name: "Bitcoin", taapiSymbol: "BTC/USDT" },
-  { symbol: "ETH/USD", name: "Ethereum", taapiSymbol: "ETH/USDT" },
-  { symbol: "XAU/USD", name: "Gold" },
-  { symbol: "WTI/USD", name: "Crude Oil (WTI)" },
+// ── Instruments tracker (zero-key, Yahoo) ────────────────────────────────────
+// `yahoo` is the Yahoo Finance ticker; `symbol` is the trader-facing label.
+// Prices, RSI(14) and MACD(12,26,9) are all derived from the daily Yahoo series
+// and computed locally — no API key required.
+const INSTRUMENTS: { symbol: string; name: string; yahoo: string; inverseRisk?: boolean }[] = [
+  { symbol: "SPX", name: "S&P 500 Index", yahoo: "^GSPC" },
+  { symbol: "NDX", name: "Nasdaq 100", yahoo: "^NDX" },
+  { symbol: "IXIC", name: "Nasdaq Composite", yahoo: "^IXIC" },
+  { symbol: "DJI", name: "Dow Jones 30", yahoo: "^DJI" },
+  { symbol: "RUT", name: "Russell 2000", yahoo: "^RUT" },
+  { symbol: "VIX", name: "Volatility Index", yahoo: "^VIX", inverseRisk: true },
+  { symbol: "BTCUSD", name: "Bitcoin", yahoo: "BTC-USD" },
+  { symbol: "ETHUSD", name: "Ethereum", yahoo: "ETH-USD" },
+  { symbol: "XAUUSD", name: "Gold Spot (GC)", yahoo: "GC=F" },
+  { symbol: "MGC", name: "Micro Gold Futures", yahoo: "MGC=F" },
+  { symbol: "SI", name: "Silver Futures", yahoo: "SI=F" },
+  { symbol: "CL", name: "WTI Crude Oil", yahoo: "CL=F" },
+  { symbol: "NG", name: "Natural Gas", yahoo: "NG=F" },
+  { symbol: "DXY", name: "US Dollar Index", yahoo: "DX-Y.NYB" },
+  { symbol: "EURUSD", name: "Euro / Dollar", yahoo: "EURUSD=X" },
+  { symbol: "USDJPY", name: "Dollar / Yen", yahoo: "JPY=X" },
 ];
 
-function biasFrom(rsiVal: number | null, hist: number | null): Bias {
+// Trend-aware bias: blends RSI, MACD histogram and price vs its 20-day average.
+function instBias(
+  rsiVal: number | null,
+  hist: number | null,
+  vsMa20: number | null,
+): { bias: Bias; level: string } {
   let score = 0;
   if (rsiVal != null) {
     if (rsiVal >= 60) score += 1;
     else if (rsiVal <= 40) score -= 1;
+    else if (rsiVal >= 52) score += 0.5;
+    else if (rsiVal <= 48) score -= 0.5;
   }
   if (hist != null) {
     if (hist > 0) score += 1;
     else if (hist < 0) score -= 1;
   }
-  return score > 0 ? "bullish" : score < 0 ? "bearish" : "neutral";
+  if (vsMa20 != null) {
+    if (vsMa20 > 0) score += 0.5;
+    else if (vsMa20 < 0) score -= 0.5;
+  }
+  const bias: Bias = score >= 0.5 ? "bullish" : score <= -0.5 ? "bearish" : "neutral";
+
+  let level: string;
+  if (rsiVal == null) level = "—";
+  else if (rsiVal >= 70) level = "Overbought (RSI>70)";
+  else if (rsiVal <= 30) level = "Oversold (RSI<30)";
+  else if (vsMa20 != null)
+    level = `${vsMa20 >= 0 ? "Above" : "Below"} 20d MA · RSI ${rsiVal.toFixed(0)}`;
+  else level = `RSI ${rsiVal.toFixed(0)}`;
+  return { bias, level };
+}
+
+// Run async tasks with a concurrency cap so we don't burst Yahoo and get throttled.
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 export async function getInstruments(): Promise<InstrumentsResult> {
   const notices: ProviderNotice[] = [];
-  if (!env.twelveData()) {
-    notices.push({
-      provider: "Twelve Data",
-      message: "TWELVE_DATA_API_KEY not set — instrument prices/indicators unavailable.",
-      varName: "TWELVE_DATA_API_KEY",
-    });
-    return { asOf: today(), instruments: [], notices };
-  }
 
-  const useTaapi = !!env.taapi();
-
-  // Sequential with a tiny stagger keeps us under Twelve Data's 8 req/min cap.
-  const out: InstrumentSignal[] = [];
-  for (const inst of INSTRUMENTS) {
+  const out = await mapLimit(INSTRUMENTS, 5, async (inst): Promise<InstrumentSignal> => {
     try {
-      const series = await twelveDataSeries(inst.symbol);
-      let rsiVal = calcRsi(series.closes);
-      let macdVal = calcMacd(series.closes);
-      let macd = macdVal?.macd ?? null;
-      let macdSignal = macdVal?.signal ?? null;
-      let macdHist = macdVal?.hist ?? null;
+      // 6mo of daily bars gives MACD(26,9) and RSI(14) plenty of history.
+      const chart = await getChart(inst.yahoo, "6mo", "1d");
+      const closes = chart.bars.map((b) => b.c).filter((c) => Number.isFinite(c) && c > 0);
+      const rsiVal = calcRsi(closes);
+      const macdVal = calcMacd(closes);
+      const macdHist = macdVal?.hist ?? null;
 
-      if (useTaapi && inst.taapiSymbol) {
-        const tr = await taapiRsi(inst.taapiSymbol);
-        const tm = await taapiMacd(inst.taapiSymbol);
-        if (tr != null) rsiVal = tr;
-        if (tm) {
-          macd = tm.macd;
-          macdSignal = tm.signal;
-          macdHist = tm.hist;
-        }
-      }
+      const ma20 = closes.length >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : null;
+      const price = chart.spot || closes[closes.length - 1] || null;
+      const vsMa20 = ma20 != null && price != null ? (price / ma20 - 1) * 100 : null;
+      const changePct =
+        chart.prevClose > 0 && price != null ? ((price - chart.prevClose) / chart.prevClose) * 100 : null;
 
-      const bias = biasFrom(rsiVal, macdHist);
-      const level =
-        rsiVal == null
-          ? "—"
-          : rsiVal >= 70
-          ? "Overbought (>70)"
-          : rsiVal <= 30
-          ? "Oversold (<30)"
-          : `RSI ${rsiVal.toFixed(0)}`;
+      const { bias, level } = instBias(rsiVal, macdHist, vsMa20);
 
-      out.push({
+      return {
         symbol: inst.symbol,
         name: inst.name,
-        price: series.price,
-        changePct: series.changePct,
+        price,
+        changePct,
         rsi: rsiVal,
-        macd,
-        macdSignal,
+        macd: macdVal?.macd ?? null,
+        macdSignal: macdVal?.signal ?? null,
         macdHist,
         bias,
-        level,
-        source: useTaapi && inst.taapiSymbol ? "TwelveData+TAAPI" : "TwelveData",
-      });
+        level: chart.stale ? `${level} · stale` : level,
+        source: "Yahoo",
+      };
     } catch (e) {
-      out.push({
+      return {
         symbol: inst.symbol,
         name: inst.name,
         price: null,
@@ -378,10 +394,14 @@ export async function getInstruments(): Promise<InstrumentsResult> {
         macdHist: null,
         bias: "neutral",
         level: "—",
-        source: "TwelveData",
+        source: "Yahoo",
         error: (e as Error).message,
-      });
+      };
     }
+  });
+
+  if (out.every((i) => i.error)) {
+    notices.push({ provider: "Yahoo", message: "All instrument series failed to load (Yahoo may be throttling — retry shortly)." });
   }
 
   return { asOf: today(), instruments: out, notices };

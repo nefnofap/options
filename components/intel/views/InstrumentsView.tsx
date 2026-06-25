@@ -102,17 +102,14 @@ export default function InstrumentsView() {
           </tbody>
         </table>
         {data.instruments.length === 0 && (
-          <div className="px-5 py-6 text-sm text-ink-300">
-            No instruments loaded. Set <span className="num">TWELVE_DATA_API_KEY</span> in{" "}
-            <span className="num">.env.local</span> (free at twelvedata.com).
-          </div>
+          <div className="px-5 py-6 text-sm text-ink-300">No instruments loaded — Yahoo may be throttling. Retry shortly.</div>
         )}
       </div>
 
       <p className="text-xs text-ink-400">
-        Bias logic: RSI ≥ 60 and a positive MACD histogram lean bullish; RSI ≤ 40 with a negative
-        histogram lean bearish. RSI/MACD computed locally from daily closes (TAAPI used only if
-        configured).
+        Bias blends RSI(14), the MACD(12,26,9) histogram, and price vs its 20-day average: RSI ≥ 60
+        with a positive histogram above the MA leans bullish; the inverse leans bearish. Prices and
+        indicators are pulled free from Yahoo daily closes — no API key required.
       </p>
 
       <Notices notices={data.notices} />
