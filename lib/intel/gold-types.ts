@@ -7,6 +7,19 @@
 
 import type { Bias, ProviderNotice } from "./types";
 
+// Daily session brief (weekday) vs weekly thesis (weekend, when the futures
+// market is shut and only news / macro / geopolitics can be gathered).
+export type BriefingMode = "daily" | "weekly";
+
+// Labels for the two expected-move horizons, so one payload renders correctly in
+// either mode: daily → { near: "session", far: "day" }; weekly → { near: "day",
+// far: "week" }. The Triple slots on the expected-move blocks are reused; only
+// the labels change.
+export interface Horizon {
+  near: string;
+  far: string;
+}
+
 export type MacroRegime =
   | "disinflationary risk-off"
   | "inflationary risk-off"
@@ -104,6 +117,9 @@ export interface SessionFrame {
 export interface GoldBriefing {
   timestamp: string;
   instrument: "XAUUSD / MGC";
+  mode: BriefingMode; // "daily" on weekdays, "weekly" over the weekend
+  period_label: string; // e.g. "Daily session brief" / "Weekly thesis — week ahead"
+  horizon: Horizon; // labels for the near/far expected-move columns
   bias: Bias;
   confidence: number; // 0..100
 
@@ -116,7 +132,7 @@ export interface GoldBriefing {
   pre_market_brief: string;
 
   tokyo_open: TokyoOpenState;
-  active_session: "Tokyo" | "London" | "New York";
+  active_session: "Tokyo" | "London" | "New York" | "Weekend";
   sessions: SessionFrame[];
 
   xauusd: InstrumentBlock & { expected_move: XauExpectedMove };

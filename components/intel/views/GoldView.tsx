@@ -145,6 +145,9 @@ export default function GoldView() {
 
   const x = data.xauusd;
   const m = data.mgc;
+  const weekly = data.mode === "weekly";
+  const nearL = data.horizon.near; // "session" | "day"
+  const farL = data.horizon.far; // "day" | "week"
 
   const copyMarkdown = async () => {
     try {
@@ -162,14 +165,17 @@ export default function GoldView() {
       <div className="flex items-end justify-between flex-wrap gap-3">
         <div>
           <div className="label-mono">
-            gold engine · {data.active_session} session · Tokyo open: {data.tokyo_open}
+            gold engine · {weekly ? "weekend · markets closed" : `${data.active_session} session · Tokyo open: ${data.tokyo_open}`}
           </div>
-          <h1 className="display-italic text-3xl text-white mt-1">Gold Daily Briefing</h1>
-          <div className="label-mono mt-1">XAUUSD · MGC · regime: {data.macro_regime}</div>
+          <h1 className="display-italic text-3xl text-white mt-1">{weekly ? "Gold Weekly Thesis" : "Gold Daily Briefing"}</h1>
+          <div className="label-mono mt-1">XAUUSD · MGC · {data.period_label} · regime: {data.macro_regime}</div>
         </div>
         <div className="flex items-center gap-6">
           <ConfidenceMeter value={data.confidence} />
-          <div className={`text-2xl num ${biasColor(data.bias)}`}>{data.bias.toUpperCase()}</div>
+          <div className="text-right">
+            <div className={`text-2xl num ${biasColor(data.bias)}`}>{data.bias.toUpperCase()}</div>
+            <div className="label-mono mt-0.5">{weekly ? "weekly" : "daily"} thesis</div>
+          </div>
         </div>
       </div>
 
@@ -210,10 +216,10 @@ export default function GoldView() {
           resistance={x.levels.resistance}
           invalidation={x.invalidation_level}
           rows={[
-            { label: "session move (points)", value: triStr(x.expected_move.session_points) },
-            { label: "session move (pips)", value: triStr(x.expected_move.session_pips, 0) },
-            { label: "day move (points)", value: triStr(x.expected_move.day_points) },
-            { label: "day move (pips)", value: triStr(x.expected_move.day_pips, 0) },
+            { label: `${nearL} move (points)`, value: triStr(x.expected_move.session_points) },
+            { label: `${nearL} move (pips)`, value: triStr(x.expected_move.session_pips, 0) },
+            { label: `${farL} move (points)`, value: triStr(x.expected_move.day_points) },
+            { label: `${farL} move (pips)`, value: triStr(x.expected_move.day_pips, 0) },
           ]}
         />
         <InstrumentTable
@@ -223,12 +229,12 @@ export default function GoldView() {
           resistance={m.levels.resistance}
           invalidation={m.invalidation_level}
           rows={[
-            { label: "session move (points)", value: triStr(m.expected_move.session_points) },
-            { label: "session move (ticks)", value: triStr(m.expected_move.session_ticks, 0) },
-            { label: "session move ($/contract)", value: triStr(m.expected_move.session_dollars, 0) },
-            { label: "day move (points)", value: triStr(m.expected_move.day_points) },
-            { label: "day move (ticks)", value: triStr(m.expected_move.day_ticks, 0) },
-            { label: "day move ($/contract)", value: triStr(m.expected_move.day_dollars, 0) },
+            { label: `${nearL} move (points)`, value: triStr(m.expected_move.session_points) },
+            { label: `${nearL} move (ticks)`, value: triStr(m.expected_move.session_ticks, 0) },
+            { label: `${nearL} move ($/contract)`, value: triStr(m.expected_move.session_dollars, 0) },
+            { label: `${farL} move (points)`, value: triStr(m.expected_move.day_points) },
+            { label: `${farL} move (ticks)`, value: triStr(m.expected_move.day_ticks, 0) },
+            { label: `${farL} move ($/contract)`, value: triStr(m.expected_move.day_dollars, 0) },
           ]}
         />
       </div>
@@ -245,7 +251,7 @@ export default function GoldView() {
 
       {/* Sessions */}
       <div className="panel p-0 overflow-hidden">
-        <div className="px-5 py-3 label-mono border-b border-white/5">session ranges (points)</div>
+        <div className="px-5 py-3 label-mono border-b border-white/5">{weekly ? "typical session ranges · reference (market closed)" : "session ranges (points)"}</div>
         <table className="w-full text-[13px]">
           <thead>
             <tr className="label-mono text-left">
