@@ -38,6 +38,8 @@ import type {
   TokyoOpenState,
   Triple,
   XauExpectedMove,
+  BriefingMode,
+  Horizon,
 } from "./gold-types";
 
 // ── Instrument conversion constants (from spec, immutable) ───────────────────
@@ -63,6 +65,15 @@ function median(xs: number[]): number {
 /** Map an internal -1..+1 (bullish-for-gold) direction to a 0..100 sub-score. */
 const toScore = (dir: number) => round(clamp(50 + clamp(dir, -1, 1) * 50, 0, 100), 0);
 const biasOfDir = (dir: number): Bias => (dir > 0.12 ? "bullish" : dir < -0.12 ? "bearish" : "neutral");
+
+// Non-negative, deterministic expected-move triple. Low/high are empirical
+// multiples around the base (≈ calm vs expansion). Shared by the daily session
+// model and the weekly thesis model.
+const mkTriple = (base: number): Triple => ({
+  low: round(Math.max(0, base * 0.6), 2),
+  base: round(Math.max(0, base), 2),
+  high: round(Math.max(0, base * 1.6), 2),
+});
 
 // ── Average True Range over OHLC bars (Wilder) ───────────────────────────────
 export function atr(bars: ChartBar[], period = 14): number | null {
@@ -151,7 +162,7 @@ function sessionStats(bars: ChartBar[]) {
   return byName;
 }
 
-// ── 1. fetch_market_data() ───────────────────────────────────────────────────
+// ── 1. fetch_market_data() ────────────────────────────────────────────────────
 export interface GoldMarketData {
   spotGold: number | null;
   mgcPrice: number | null;
@@ -190,7 +201,7 @@ export async function fetchMarketData(): Promise<GoldMarketData> {
   };
 
   const [goldD, goldH, gold5, mgcD, dxyD, vixD, oilD] = await Promise.all([
-    safeChart("GC=F", "6mo", "1d"),
+    safeChart("GC=F", "1y", "1d"),
     safeChart("GC=F", "1mo", "1h"),
     safeChart("GC=F", "5d", "15m"),
     safeChart("MGC=F", "5d", "1d"),
@@ -348,7 +359,7 @@ export function computeMacroRegime(
   };
 }
 
-// ── 3. compute_microeconomics() ──────────────────────────────────────────────
+// ── 3. compute_microeconomics() ─────────────────────────────────────────────
 // Structural supply-demand backdrop. Treated as slow-moving support/headwind,
 // not a timing tool. Without central-bank / ETF / physical feeds wired, we proxy
 // the structural trend from gold's position vs its 200-day average and flag the
@@ -453,7 +464,7 @@ export function computeFlows(md: GoldMarketData): LayerScore & { state: string }
   };
 }
 
-// ── 5. compute_microstructure() ──────────────────────────────────────────────
+// ── 5. compute_microstructure() ───────────────────────────────────────────────
 // Intraday acceptance vs VWAP / prior-day levels, plus an explicit Tokyo-open
 // classification.
 export function computeMicrostructure(
@@ -682,13 +693,8 @@ export function computeExpectedMove(
     dayBase *= ev;
   }
 
-  // Non-negative, deterministic triples. Low/high are empirical multiples around
-  // the base (≈ calm vs expansion days).
-  const mk = (base: number): Triple => ({
-    low: round(Math.max(0, base * 0.6), 2),
-    base: round(Math.max(0, base), 2),
-    high: round(Math.max(0, base * 1.6), 2),
-  });
+  // Non-negative, deterministic triples (shared builder).
+  const mk = mkTriple;
 
   return { sessionPts: mk(sessionBase), dayPts: mk(dayBase), atrDaily };
 }
@@ -719,7 +725,7 @@ function mgcExpectedMove(sessionPts: Triple, dayPts: Triple): MgcExpectedMove {
   };
 }
 
-// ── levels + invalidation ────────────────────────────────────────────────────
+// ── levels + invalidation ───────────────────────────────────────────────────
 function buildLevels(md: GoldMarketData, spot: number | null, bias: Bias, dayBase: number) {
   const support: number[] = [];
   const resistance: number[] = [];
@@ -830,22 +836,31 @@ export function formatMarkdown(b: Omit<GoldBriefing, "markdown">): string {
   const x = b.xauusd;
   const m = b.mgc;
   const L = (arr: number[]) => (arr.length ? arr.join(" · ") : "—");
-  return `# Gold Daily Briefing — XAUUSD / MGC
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const near = cap(b.horizon.near); // "Session" | "Day"
+  const far = cap(b.horizon.far); // "Day" | "Week"
+  const weekly = b.mode === "weekly";
+  const title = weekly ? "# Gold Weekly Thesis — XAUUSD / MGC (week ahead)" : "# Gold Daily Briefing — XAUUSD / MGC";
+  const subline = weekly
+    ? `_${b.timestamp} · ${b.period_label} · markets closed (weekend)_`
+    : `_${b.timestamp} · ${b.active_session} session · Tokyo open: ${b.tokyo_open}_`;
+  const briefLabel = weekly ? "**Week-ahead brief.**" : "**Pre-market brief.**";
+  return `${title}
 
 **Bias:** ${badge}  ·  **Confidence:** ${b.confidence}/100  ·  **Regime:** ${b.macro_regime}
-_${b.timestamp} · ${b.active_session} session · Tokyo open: ${b.tokyo_open}_
+${subline}
 
 ${b.macro_thesis}
 
-**Pre-market brief.** ${b.pre_market_brief}
+${briefLabel} ${b.pre_market_brief}
 
 ### XAUUSD  (spot ${fmt(x.spot)})
 | | low / base / high |
 |---|---|
-| Session move (points) | ${tri(x.expected_move.session_points, 1)} |
-| Session move (pips) | ${tri(x.expected_move.session_pips, 0)} |
-| Day move (points) | ${tri(x.expected_move.day_points, 1)} |
-| Day move (pips) | ${tri(x.expected_move.day_pips, 0)} |
+| ${near} move (points) | ${tri(x.expected_move.session_points, 1)} |
+| ${near} move (pips) | ${tri(x.expected_move.session_pips, 0)} |
+| ${far} move (points) | ${tri(x.expected_move.day_points, 1)} |
+| ${far} move (pips) | ${tri(x.expected_move.day_pips, 0)} |
 | Support | ${L(x.levels.support)} |
 | Resistance | ${L(x.levels.resistance)} |
 | Invalidation | ${fmt(x.invalidation_level)} |
@@ -853,12 +868,12 @@ ${b.macro_thesis}
 ### MGC — Micro Gold  (price ${fmt(m.spot)})
 | | low / base / high |
 |---|---|
-| Session move (points) | ${tri(m.expected_move.session_points, 1)} |
-| Session move (ticks) | ${tri(m.expected_move.session_ticks, 0)} |
-| Session move ($/contract) | ${tri(m.expected_move.session_dollars, 0)} |
-| Day move (points) | ${tri(m.expected_move.day_points, 1)} |
-| Day move (ticks) | ${tri(m.expected_move.day_ticks, 0)} |
-| Day move ($/contract) | ${tri(m.expected_move.day_dollars, 0)} |
+| ${near} move (points) | ${tri(m.expected_move.session_points, 1)} |
+| ${near} move (ticks) | ${tri(m.expected_move.session_ticks, 0)} |
+| ${near} move ($/contract) | ${tri(m.expected_move.session_dollars, 0)} |
+| ${far} move (points) | ${tri(m.expected_move.day_points, 1)} |
+| ${far} move (ticks) | ${tri(m.expected_move.day_ticks, 0)} |
+| ${far} move ($/contract) | ${tri(m.expected_move.day_dollars, 0)} |
 | Support | ${L(m.levels.support)} |
 | Resistance | ${L(m.levels.resistance)} |
 | Invalidation | ${fmt(m.invalidation_level)} |
@@ -878,9 +893,260 @@ _Data freshness — market: ${b.data_freshness.market_data}; macro: ${b.data_fre
 `;
 }
 
+// ── weekend detection + weekly thesis machinery ─────────────────────────────
+// Gold futures are shut across the weekend, so an intraday "daily" brief makes
+// no sense on Sat/Sun. Instead we still gather the feeds that DO update on
+// weekends (news, geopolitics, FRED macro) and frame a forward-looking WEEKLY
+// thesis off the prior week's range and a weekly expected move.
+export function marketModeFor(now: Date): BriefingMode {
+  const day = now.getUTCDay(); // 0 = Sun … 6 = Sat
+  return day === 0 || day === 6 ? "weekly" : "daily";
+}
+
+// ISO-8601 week key (year + week number), Thursday-anchored.
+function isoWeekKey(d: Date): string {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7; // Mon = 0 … Sun = 6
+  date.setUTCDate(date.getUTCDate() - dayNum + 3); // nearest Thursday
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const week =
+    1 +
+    Math.round(
+      ((date.getTime() - firstThursday.getTime()) / 86_400_000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7,
+    );
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+// Aggregate daily bars into weekly OHLCV bars (chronological).
+function resampleWeekly(daily: ChartBar[]): ChartBar[] {
+  const groups = new Map<string, ChartBar[]>();
+  for (const b of daily) {
+    const k = isoWeekKey(new Date(b.t * 1000));
+    (groups.get(k) ?? groups.set(k, []).get(k)!).push(b);
+  }
+  const weeks: ChartBar[] = [];
+  for (const [, bars] of groups) {
+    if (!bars.length) continue;
+    weeks.push({
+      t: bars[0].t,
+      o: bars[0].o,
+      h: Math.max(...bars.map((b) => b.h)),
+      l: Math.min(...bars.map((b) => b.l)),
+      c: bars[bars.length - 1].c,
+      v: sum(bars.map((b) => b.v || 0)),
+    });
+  }
+  return weeks.sort((a, b) => a.t - b.t);
+}
+
+interface PriorWeek {
+  high: number;
+  low: number;
+  close: number;
+  open: number;
+}
+// On a weekend the most recent weekly bar IS the just-finished trading week.
+function lastWeek(weekly: ChartBar[]): PriorWeek | null {
+  if (!weekly.length) return null;
+  const w = weekly[weekly.length - 1];
+  return { high: w.h, low: w.l, close: w.c, open: w.o };
+}
+
+// Weekly expected move. `near` = a typical day in the week ahead (daily ATR);
+// `far` = the week itself (weekly ATR blended with the last realised week).
+export function computeWeeklyExpectedMove(
+  daily: ChartBar[],
+  weekly: ChartBar[],
+  highImpactWeek: number,
+): { nearPts: Triple; farPts: Triple; atrWeekly: number | null; atrDaily: number | null } {
+  const atrDaily = atr(daily, 14);
+  const atrWeekly = weekly.length >= 4 ? atr(weekly, Math.min(14, weekly.length - 1)) : null;
+  const realisedWeek = weekly.length ? weekly[weekly.length - 1].h - weekly[weekly.length - 1].l : null;
+
+  const farInputs = [atrWeekly, realisedWeek].filter((x): x is number => x != null && x > 0);
+  let farBase = farInputs.length ? mean(farInputs) : atrDaily != null ? atrDaily * Math.sqrt(5) : 0;
+  let nearBase = atrDaily ?? (atrWeekly != null ? atrWeekly / Math.sqrt(5) : 0);
+
+  // Event-risk widener spread across the week (softer than the single-day case).
+  if (highImpactWeek > 0) {
+    const ev = 1 + Math.min(0.3, highImpactWeek * 0.05);
+    farBase *= ev;
+    nearBase *= ev;
+  }
+  return { nearPts: mkTriple(nearBase), farPts: mkTriple(farBase), atrWeekly, atrDaily };
+}
+
+// Weekly structure read — replaces the intraday microstructure layer on weekends.
+// Uses position within the prior-week range, the prior-week close location, and
+// price vs a 10-week average. Returns a layer plus a plain-language week state.
+export function computeWeeklyStructure(
+  daily: ChartBar[],
+  weekly: ChartBar[],
+  spot: number | null,
+): { layer: LayerScore; weekState: string } {
+  const drivers: string[] = [];
+  let dir = 0;
+  const pw = lastWeek(weekly);
+  let weekState = "inside prior-week range";
+
+  if (spot != null && pw) {
+    const span = Math.max(1e-9, pw.high - pw.low);
+    if (spot > pw.high) {
+      dir += 0.4;
+      weekState = "above prior-week high";
+      drivers.push("Above prior-week high — weekly breakout in play");
+    } else if (spot < pw.low) {
+      dir -= 0.4;
+      weekState = "below prior-week low";
+      drivers.push("Below prior-week low — weekly breakdown in play");
+    } else {
+      const pos = (spot - pw.low) / span;
+      if (pos > 0.66) {
+        dir += 0.15;
+        drivers.push("Holding the upper third of the prior-week range");
+      } else if (pos < 0.34) {
+        dir -= 0.15;
+        drivers.push("Pinned to the lower third of the prior-week range");
+      } else {
+        drivers.push("Mid prior-week range — weekly balance");
+      }
+    }
+    // Where the prior week closed inside its own range.
+    if (pw.close > pw.high - span * 0.25) {
+      dir += 0.1;
+      drivers.push("Prior week closed in its upper quartile — momentum up");
+    } else if (pw.close < pw.low + span * 0.25) {
+      dir -= 0.1;
+      drivers.push("Prior week closed in its lower quartile — momentum down");
+    }
+  } else {
+    drivers.push("Prior-week range unavailable — weekly structure degraded");
+  }
+
+  // Weekly trend filter.
+  const wc = weekly.map((b) => b.c);
+  const wma = sma(wc, Math.min(10, wc.length));
+  if (spot != null && wma != null) {
+    dir += spot > wma ? 0.15 : -0.15;
+    drivers.push(`Price ${spot > wma ? "above" : "below"} the 10-week average`);
+  }
+  drivers.push("Intraday session structure n/a over the weekend — using weekly range / close");
+
+  dir = clamp(dir, -1, 1);
+  return {
+    layer: {
+      score: toScore(dir),
+      bias: biasOfDir(dir),
+      direction: dir,
+      headline: `Weekly structure ${biasOfDir(dir)}; ${weekState}.`,
+      drivers,
+    },
+    weekState,
+  };
+}
+
+// Weekly support/resistance from the last two weekly bars; invalidation beyond.
+function buildWeeklyLevels(weekly: ChartBar[], spot: number | null, bias: Bias, weekBase: number) {
+  const support: number[] = [];
+  const resistance: number[] = [];
+  const push = (arr: number[], v: number | null | undefined) => {
+    if (v != null && Number.isFinite(v)) arr.push(round(v, 1));
+  };
+  const pw = lastWeek(weekly);
+  const pw2 = weekly.length >= 2 ? weekly[weekly.length - 2] : null;
+  if (spot != null) {
+    if (pw) {
+      push(pw.low < spot ? support : resistance, pw.low);
+      push(pw.high > spot ? resistance : support, pw.high);
+    }
+    if (pw2) {
+      push(pw2.l < spot ? support : resistance, pw2.l);
+      push(pw2.h > spot ? resistance : support, pw2.h);
+    }
+  }
+  const dedupSort = (arr: number[], dir: "asc" | "desc") =>
+    [...new Set(arr)].sort((a, b) => (dir === "asc" ? a - b : b - a)).slice(0, 3);
+  const sup = dedupSort(support, "desc");
+  const res = dedupSort(resistance, "asc");
+
+  let invalidation: number | null = null;
+  const buf = Math.max(weekBase * 0.5, 1);
+  if (spot != null) {
+    if (bias === "bullish") invalidation = round((sup[0] ?? spot) - buf, 1);
+    else if (bias === "bearish") invalidation = round((res[0] ?? spot) + buf, 1);
+    else invalidation = round((sup[0] ?? spot) - buf, 1);
+  }
+  return { support: sup, resistance: res, invalidation };
+}
+
+function buildWeeklyScenarios(
+  spot: number | null,
+  res0: number | undefined,
+  sup0: number | undefined,
+  weekBase: number,
+  _bias: Bias,
+): GoldScenario[] {
+  const tgtUp = spot != null ? round(spot + weekBase, 1) : null;
+  const tgtDn = spot != null ? round(spot - weekBase, 1) : null;
+  return [
+    {
+      name: "weekly continuation higher",
+      trigger: res0 != null ? `Weekly acceptance above ${res0} (prior-week high)` : "Break and hold above the prior-week high",
+      target: tgtUp != null ? `${tgtUp} (≈ +1 weekly expected move)` : "+1 weekly expected move",
+      risk: "A firmer dollar or hawkish data through the week caps the breakout",
+    },
+    {
+      name: "weekly rejection lower",
+      trigger: sup0 != null ? `Weekly close back below ${sup0} (prior-week low)` : "Weekly close below the prior-week low",
+      target: tgtDn != null ? `${tgtDn} (≈ -1 weekly expected move)` : "-1 weekly expected move",
+      risk: "A weekend haven catalyst gaps price back up on the Asia open",
+    },
+    {
+      name: "weekly range / rotation",
+      trigger: "Price rotates between the prior-week high and low with no weekly acceptance",
+      implication: "Trade the range edges, stand aside mid-range; let the week-ahead catalysts resolve it",
+      risk: "A scheduled catalyst breaks the balance — don't anchor to the range",
+    },
+  ];
+}
+
+// Week-ahead event risk: count high/medium-impact items dated within the next 7
+// days (falls back to counting all returned rows if dates don't parse).
+function computeEventRiskWeekly(events: CalendarEvent[]): { layer: LayerScore; highImpact: number } {
+  const now = Date.now();
+  const horizon = now + 7 * 86_400_000;
+  const inWindow = events.filter((e) => {
+    const t = Date.parse(e.time);
+    return Number.isNaN(t) ? true : t >= now - 86_400_000 && t <= horizon;
+  });
+  const high = inWindow.filter((e) => e.importance >= 3).length;
+  const med = inWindow.filter((e) => e.importance === 2).length;
+  const risk = clamp(high * 0.35 + med * 0.12, 0, 1);
+  const drivers: string[] = [];
+  if (high) drivers.push(`${high} high-impact event(s) in the week ahead`);
+  if (med) drivers.push(`${med} medium-impact event(s) in the week ahead`);
+  if (!high && !med) drivers.push("Light scheduled calendar in the week ahead");
+  return {
+    layer: {
+      score: round(50 + risk * 50, 0),
+      bias: "neutral",
+      direction: 0,
+      headline: risk > 0.5 ? "Heavy week-ahead event risk — size down early" : "Manageable week-ahead event risk",
+      drivers,
+    },
+    highImpact: high,
+  };
+}
+
 // ── orchestrator: getGoldBriefing() ──────────────────────────────────────────
-export async function getGoldBriefing(): Promise<GoldBriefing> {
+// Forms a DAILY session brief on weekdays and a WEEKLY thesis over the weekend
+// (auto by UTC day; override with opts.mode). News, geopolitics and FRED macro
+// are gathered in both modes — that is what keeps the engine "gathering news on
+// the weekend" even though the futures tape is shut.
+export async function getGoldBriefing(opts?: { mode?: BriefingMode }): Promise<GoldBriefing> {
   const notices: ProviderNotice[] = [];
+  const mode: BriefingMode = opts?.mode ?? marketModeFor(new Date());
+  const weekly = mode === "weekly";
 
   const [md, macro, sentiment, events] = await Promise.all([
     fetchMarketData(),
@@ -898,54 +1164,110 @@ export async function getGoldBriefing(): Promise<GoldBriefing> {
   const headlines: ScoredHeadline[] = sentiment?.headlines ?? [];
   const geo = assessGeopolitics(headlines);
 
-  // Session statistics from the hourly series (≈1mo of multi-desk ranges).
+  // Reference session statistics (used for the daily microstructure read and as
+  // a reference table in weekly mode).
   const sess = sessionStats(md.hourBars);
-  const nowUtcHour = new Date().getUTCHours();
-  const activeSession = activeSessionName(nowUtcHour);
 
-  // Layers.
+  // Direction layers shared by both modes.
   const { regime, layer: macroLayer } = computeMacroRegime(macro, md);
   const microLayer = computeMicroeconomics(md);
   const flowLayer = computeFlows(md);
-  const { layer: msLayer, tokyo, frames } = computeMicrostructure(md, sess);
   const geoLayer = computeGeopoliticalRisk(geo, macroLayer.direction);
-  const { layer: eventLayer, highImpact } = computeEventRisk(events);
-  frames.forEach((f) => (f.active = f.name === activeSession));
 
-  // Expected move (shared points → both instruments).
-  const em = computeExpectedMove(md, sess, activeSession, highImpact);
-  const dayBase = em.dayPts.base;
+  // Mode-specific pieces.
+  let msLayer: LayerScore;
+  let tokyo: TokyoOpenState;
+  let frames: SessionFrame[];
+  let activeSession: GoldBriefing["active_session"];
+  let nearPts: Triple;
+  let farPts: Triple;
+  let atrDaily: number | null;
+  let eventLayer: LayerScore;
+  let highImpact: number;
+  let narrowRange: boolean;
+  let cleanAcceptance: boolean;
+  let horizon: Horizon;
+  let period_label: string;
 
-  // Narrow-range / clean-acceptance flags feed the confidence model.
-  const narrowRange =
-    em.atrDaily != null && md.priorDay.high != null && md.priorDay.low != null
-      ? md.priorDay.high - md.priorDay.low < em.atrDaily * 0.6
-      : false;
-  const cleanAcceptance = tokyo === "bullish acceptance" || tokyo === "bearish acceptance";
+  const weeklyBars = resampleWeekly(md.dailyBars);
+
+  if (weekly) {
+    const struct = computeWeeklyStructure(md.dailyBars, weeklyBars, md.spotGold);
+    msLayer = struct.layer;
+    tokyo = "no-trade / neutral range";
+    const ev = computeEventRiskWeekly(events);
+    eventLayer = ev.layer;
+    highImpact = ev.highImpact;
+    const wem = computeWeeklyExpectedMove(md.dailyBars, weeklyBars, highImpact);
+    nearPts = wem.nearPts;
+    farPts = wem.farPts;
+    atrDaily = wem.atrDaily;
+
+    const { frames: refFrames } = computeMicrostructure(md, sess);
+    refFrames.forEach((f) => (f.active = false));
+    frames = refFrames;
+    activeSession = "Weekend";
+
+    const pw = lastWeek(weeklyBars);
+    narrowRange = wem.atrWeekly != null && pw != null ? pw.high - pw.low < wem.atrWeekly * 0.6 : false;
+    cleanAcceptance = struct.weekState === "above prior-week high" || struct.weekState === "below prior-week low";
+    horizon = { near: "day", far: "week" };
+    period_label = "Weekly thesis — week ahead";
+  } else {
+    const ms = computeMicrostructure(md, sess);
+    msLayer = ms.layer;
+    tokyo = ms.tokyo;
+    frames = ms.frames;
+    const nowUtcHour = new Date().getUTCHours();
+    activeSession = activeSessionName(nowUtcHour);
+    frames.forEach((f) => (f.active = f.name === activeSession));
+
+    const ev = computeEventRisk(events);
+    eventLayer = ev.layer;
+    highImpact = ev.highImpact;
+
+    const em = computeExpectedMove(md, sess, activeSession, highImpact);
+    nearPts = em.sessionPts;
+    farPts = em.dayPts;
+    atrDaily = em.atrDaily;
+
+    narrowRange =
+      em.atrDaily != null && md.priorDay.high != null && md.priorDay.low != null
+        ? md.priorDay.high - md.priorDay.low < em.atrDaily * 0.6
+        : false;
+    cleanAcceptance = tokyo === "bullish acceptance" || tokyo === "bearish acceptance";
+    horizon = { near: "session", far: "day" };
+    period_label = "Daily session brief";
+  }
+
+  const farBase = farPts.base;
 
   const { bias, confidence } = scoreBias(
     { macro: macroLayer, micro: microLayer, flow: flowLayer, micro_structure: msLayer, geo: geoLayer, event: eventLayer },
-    { highImpactEvents: highImpact, atrDaily: em.atrDaily, spot: md.spotGold, narrowRange, cleanAcceptance },
+    { highImpactEvents: highImpact, atrDaily, spot: md.spotGold, narrowRange, cleanAcceptance },
   );
 
-  // Instrument blocks.
-  const xLevels = buildLevels(md, md.spotGold, bias, dayBase);
-  const mLevels = buildLevels({ ...md, priorDay: md.priorDay }, md.mgcPrice, bias, dayBase);
+  // Instrument blocks. near→session_* slots, far→day_* slots (labels via horizon).
+  const xLevels = weekly
+    ? buildWeeklyLevels(weeklyBars, md.spotGold, bias, farBase)
+    : buildLevels(md, md.spotGold, bias, farBase);
+  const mLevels = weekly
+    ? buildWeeklyLevels(weeklyBars, md.mgcPrice, bias, farBase)
+    : buildLevels({ ...md, priorDay: md.priorDay }, md.mgcPrice, bias, farBase);
   const xauusd: InstrumentBlock & { expected_move: XauExpectedMove } = {
     spot: md.spotGold,
-    expected_move: xauExpectedMove(em.sessionPts, em.dayPts),
+    expected_move: xauExpectedMove(nearPts, farPts),
     invalidation_level: xLevels.invalidation,
     levels: { support: xLevels.support, resistance: xLevels.resistance },
   };
   const mgc: InstrumentBlock & { expected_move: MgcExpectedMove } = {
     spot: md.mgcPrice,
-    expected_move: mgcExpectedMove(em.sessionPts, em.dayPts),
+    expected_move: mgcExpectedMove(nearPts, farPts),
     invalidation_level: mLevels.invalidation,
     levels: { support: mLevels.support, resistance: mLevels.resistance },
   };
 
-  // ── narrative (spec order: macro → dollar/yields → micro → flows → geo →
-  // structure/Tokyo → expected move/invalidation) ──
+  // ── narrative ──
   const macro_thesis =
     `${macroLayer.headline} ${macroLayer.drivers.slice(0, 3).join("; ")}. ` +
     `For gold the operative cross-currents are the dollar and the real-rate complex: ` +
@@ -955,12 +1277,18 @@ export async function getGoldBriefing(): Promise<GoldBriefing> {
   const flow_thesis = `${flowLayer.headline} ${flowLayer.drivers.slice(0, 3).join("; ")}.`;
   const microstructure_thesis = `${msLayer.headline} ${msLayer.drivers.slice(0, 4).join("; ")}.`;
   const geopolitical_thesis = `${geoLayer.headline} ${geoLayer.drivers.join("; ")}.`;
-  const pre_market_brief =
-    `Net read is ${bias.toUpperCase()} at ${confidence}/100 confidence into the ${activeSession} session. ` +
-    `${cleanAcceptance ? "Price is accepting directionally" : narrowRange ? "Price is coiled in a narrow range" : "Price is two-way"}; ` +
-    `${highImpact ? `${highImpact} high-impact event(s) today argue for lighter size` : "no major scheduled catalysts today"}. ` +
-    `XAUUSD base session move ≈ ${em.sessionPts.base.toFixed(1)} pts (${(em.sessionPts.base * XAU_PIPS_PER_POINT).toFixed(0)} pips); ` +
-    `invalidation ${xauusd.invalidation_level ?? "—"}.`;
+
+  const pre_market_brief = weekly
+    ? `Week-ahead read is ${bias.toUpperCase()} at ${confidence}/100 confidence. ` +
+      `${cleanAcceptance ? "Price enters the week breaking the prior-week range" : narrowRange ? "Price closed the week coiled in a narrow range" : "Price is mid weekly range"}; ` +
+      `${highImpact ? `${highImpact} high-impact event(s) across the week argue for staged risk` : "a light scheduled calendar ahead"}. ` +
+      `XAUUSD base weekly move ≈ ${farPts.base.toFixed(1)} pts (${(farPts.base * XAU_PIPS_PER_POINT).toFixed(0)} pips); ` +
+      `weekly invalidation ${xauusd.invalidation_level ?? "—"}.`
+    : `Net read is ${bias.toUpperCase()} at ${confidence}/100 confidence into the ${activeSession} session. ` +
+      `${cleanAcceptance ? "Price is accepting directionally" : narrowRange ? "Price is coiled in a narrow range" : "Price is two-way"}; ` +
+      `${highImpact ? `${highImpact} high-impact event(s) today argue for lighter size` : "no major scheduled catalysts today"}. ` +
+      `XAUUSD base session move ≈ ${nearPts.base.toFixed(1)} pts (${(nearPts.base * XAU_PIPS_PER_POINT).toFixed(0)} pips); ` +
+      `invalidation ${xauusd.invalidation_level ?? "—"}.`;
 
   // Drivers: the most decisive line from each layer.
   const drivers = [
@@ -971,7 +1299,9 @@ export async function getGoldBriefing(): Promise<GoldBriefing> {
     eventLayer.drivers[0],
   ].filter(Boolean) as string[];
 
-  const scenarios = buildScenarios(md, xauusd, dayBase, bias);
+  const scenarios = weekly
+    ? buildWeeklyScenarios(md.spotGold, xauusd.levels.resistance[0], xauusd.levels.support[0], farBase, bias)
+    : buildScenarios(md, xauusd, farBase, bias);
 
   const scores: GoldScores = {
     macro: macroLayer.score,
@@ -982,10 +1312,19 @@ export async function getGoldBriefing(): Promise<GoldBriefing> {
     event_risk: eventLayer.score,
   };
 
-  const freshLabel = md.stale ? "stale (served from cache — Yahoo throttled)" : "live";
+  const freshLabel = md.stale
+    ? weekly
+      ? "weekend — last session served from cache (market closed)"
+      : "stale (served from cache — Yahoo throttled)"
+    : weekly
+      ? "weekend — prior-week close (market closed)"
+      : "live";
   const base: Omit<GoldBriefing, "markdown"> = {
     timestamp: new Date().toISOString(),
     instrument: "XAUUSD / MGC",
+    mode,
+    period_label,
+    horizon,
     bias,
     confidence,
     macro_regime: regime,
