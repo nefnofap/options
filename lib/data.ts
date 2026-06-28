@@ -3,6 +3,7 @@
 
 import { getCboeChain, getCboeQuote } from "./cboe";
 import { getYahooChart, getYahooNews, getYahooQuoteFromChart } from "./yahoo";
+import { getStooqDaily, stooqSupports } from "./stooq";
 import { UpstreamError } from "./errors";
 import { cacheGet, cacheSet, cachePeek } from "./cache";
 import type { ChartBar, NewsItem, OptionChain, QuoteSnapshot } from "./types";
@@ -66,6 +67,20 @@ export async function getChart(
     cacheSet(key, data);
     return { ...data, stale: false };
   } catch (e) {
+    // Coarse (daily/weekly) bars: before giving up, try a keyless non-Yahoo
+    // source so the engine stays populated when Yahoo 429s the serverless IP
+    // (the usual cold-weekend failure). Stooq only covers a few mapped symbols.
+    if (isCoarse && stooqSupports(symbol)) {
+      try {
+        const alt = await getStooqDaily(symbol, interval as "1d" | "1wk", revalidate);
+        if (alt.bars.length) {
+          cacheSet(key, alt);
+          return { ...alt, stale: false };
+        }
+      } catch {
+        /* Stooq also unavailable — fall through to stale cache / throw. */
+      }
+    }
     // Throttled or upstream down: serve the last good data (stale) if we have
     // any, so the chart stays populated instead of erroring out on a 429.
     const stale = cachePeek<ChartResult>(key);
