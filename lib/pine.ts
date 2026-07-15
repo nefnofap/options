@@ -154,23 +154,21 @@ export function generatePineScript(input: GeneratePineInput): string {
 // ║  Regime: ${longGamma ? "LONG gamma (dealers dampen)" : "SHORT gamma (dealers amplify)"}
 // ║  ${familyNote}
 // ║                                                                    ║
-// ║  Dark theme matched to the A+ website. Levels are baked in CASH-   ║
-// ║  INDEX POINTS and auto-scaled to the charted instrument. Draws     ║
-// ║  walls / flip / pain / spot + reversal-bias tags and toggleable    ║
-// ║  Fibonacci retracement zones (wall-to-wall & flip-anchored). Paste ║
-// ║  into TradingView → Pine Editor → "Add to chart". Re-export from   ║
-// ║  the app for fresh levels.                                         ║
+// ║  Monochrome theme. Levels are baked in CASH-INDEX POINTS and auto- ║
+// ║  scaled to the charted instrument. Draws walls / flip / pain /     ║
+// ║  spot + reversal-bias tags. Positive vs negative gamma is shown by ║
+// ║  tone (bright = +γ / dim = −γ), not colour. Paste into TradingView ║
+// ║  → Pine Editor → "Add to chart". Re-export from the app for fresh  ║
+// ║  levels.                                                           ║
 // ╚══════════════════════════════════════════════════════════════════╝
 indicator("${title}", overlay = true, max_boxes_count = 500, max_lines_count = 100, max_labels_count = 100)
 
-// ── Theme (A+ website palette) ───────────────────────────────────────
-// ink-950 #070708 · ink-900 #0b0b0d · ink-300 #8c8c98 · bull #5fd39a · bear #f06a7a
-posCol   = input.color(#5fd39a, "Positive gamma / support", group = "Theme")
-negCol   = input.color(#f06a7a, "Negative gamma / resistance", group = "Theme")
+// ── Theme (monochrome) ───────────────────────────────────────────────
+// Grayscale only — positive vs negative gamma differ by tone, not hue.
+posCol   = input.color(#e6e6ea, "Positive gamma / support", group = "Theme")
+negCol   = input.color(#7a7a86, "Negative gamma / resistance", group = "Theme")
 inkLine  = input.color(#8c8c98, "Neutral (flip / pain)", group = "Theme")
 inkText  = input.color(#e6e6ea, "Label text", group = "Theme")
-darkBg   = input.bool(true,  "Dark chart backdrop", group = "Theme")
-bgFill   = input.color(#070708, "Backdrop color", group = "Theme")
 lblSize  = input.string("small", "Label size", options = ["tiny", "small", "normal", "large"], group = "Theme")
 
 // ── Behaviour ────────────────────────────────────────────────────────
@@ -181,15 +179,6 @@ showBias = input.bool(true,  "Show reversal bias on walls", group = "Display")
 showSpot = input.bool(true,  "Show spot price line", group = "Display")
 offsetB  = input.int(10, "Bars offset to right",  minval = 0,  maxval = 200, group = "Display")
 maxLen   = input.int(60, "Max bar length (bars)", minval = 5,  maxval = 300, group = "Display")
-
-// ── Retracement zones (Fibonacci) ────────────────────────────────────
-showFibW = input.bool(true,  "Retracement: wall-to-wall fibs", group = "Retracement")
-showFibF = input.bool(false, "Retracement: flip-anchored fibs", group = "Retracement")
-fibCol   = input.color(#c9a24b, "Retracement color", group = "Retracement")
-
-// Paint a dark backdrop so the indicator matches the website regardless of the
-// user's TradingView theme (kept subtle so candles stay readable).
-bgcolor(darkBg ? color.new(bgFill, 70) : na, title = "A+ dark backdrop")
 
 // ── Baked GEX data (cash-index points) ───────────────────────────────
 var strikes = ${arr(strikeIdx)}
@@ -215,13 +204,6 @@ var box[]   boxes  = array.new<box>()
 var line[]  lines  = array.new<line>()
 var label[] labels = array.new<label>()
 
-// Fib retracement helpers (global scope — Pine requires it). 'rx' is the right
-// edge x; 'lines'/'labels'/'fibCol'/'lblSize' are read from global scope.
-f_fib(lo, hi, r) => lo + (hi - lo) * r
-f_fibLine(yp, txt, rx) =>
-    array.push(lines,  line.new(bar_index, yp, rx, yp, color = color.new(fibCol, 20), width = 1, style = line.style_dashed, extend = extend.left))
-    array.push(labels, label.new(rx, yp, txt, style = label.style_label_left, color = color.new(#0b0b0d, 25), textcolor = color.new(fibCol, 10), size = f_sz(lblSize)))
-
 if barstate.islast
     // Clear the previous render so levels track scale / input changes.
     for b in boxes
@@ -237,7 +219,7 @@ if barstate.islast
     halfH  = stepPts * scale * 0.40
     rightX = bar_index + offsetB
 
-    // Horizontal GEX profile bars (length ∝ |gamma|, green = +γ, red = −γ).
+    // Horizontal GEX profile bars (length ∝ |gamma|, bright = +γ, dim = −γ).
     n = array.size(strikes)
     if showBars and n > 0
         for i = 0 to n - 1
@@ -273,27 +255,5 @@ if barstate.islast
         y = spotPts * scale
         array.push(lines,  line.new(bar_index, y, rightX, y, color = color.new(inkText, 30), width = 1, style = line.style_solid, extend = extend.left))
         array.push(labels, label.new(rightX, y, "SPOT @ export " + str.tostring(y, format.mintick), style = label.style_label_left, color = color.new(#0b0b0d, 15), textcolor = inkText, size = f_sz(lblSize)))
-
-    // ── Retracement zones (Fibonacci) ────────────────────────────────
-    // Fib ratios drawn as dashed lines; price tends to stall/retrace at these.
-    // Wall-to-wall: Put Wall (0%) → Call Wall (100%), the gamma-implied range.
-    if showFibW and not na(callPts) and not na(putPts)
-        lo = putPts * scale
-        hi = callPts * scale
-        f_fibLine(f_fib(lo, hi, 0.382), "RETR 38.2%", rightX)
-        f_fibLine(f_fib(lo, hi, 0.5),   "RETR 50%",   rightX)
-        f_fibLine(f_fib(lo, hi, 0.618), "RETR 61.8%", rightX)
-
-    // Flip-anchored: from the Gamma Flip (0%) out to each wall (100%).
-    if showFibF and not na(flipPts)
-        f0 = flipPts * scale
-        if not na(callPts)
-            hi = callPts * scale
-            f_fibLine(f_fib(f0, hi, 0.382), "FLIP→CW 38.2%", rightX)
-            f_fibLine(f_fib(f0, hi, 0.618), "FLIP→CW 61.8%", rightX)
-        if not na(putPts)
-            lo = putPts * scale
-            f_fibLine(f_fib(f0, lo, 0.382), "FLIP→PW 38.2%", rightX)
-            f_fibLine(f_fib(f0, lo, 0.618), "FLIP→PW 61.8%", rightX)
 `;
 }
