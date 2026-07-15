@@ -177,7 +177,7 @@ showBars = input.bool(true,  "Show GEX profile bars", group = "Display")
 showKey  = input.bool(true,  "Show key levels (flip / walls / pain)", group = "Display")
 showBias = input.bool(true,  "Show reversal bias on walls", group = "Display")
 showSpot = input.bool(true,  "Show spot price line", group = "Display")
-offsetB  = input.int(10, "Bars offset to right",  minval = 0,  maxval = 200, group = "Display")
+offsetB  = input.int(100, "Bars offset to right",  minval = 0,  maxval = 200, group = "Display")
 maxLen   = input.int(60, "Max bar length (bars)", minval = 5,  maxval = 300, group = "Display")
 
 // ── Baked GEX data (cash-index points) ───────────────────────────────
